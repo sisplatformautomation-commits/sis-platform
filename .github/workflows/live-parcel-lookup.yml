@@ -11,7 +11,7 @@ jobs:
   lookup:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve parcel and fetch official orthophoto
+      - name: Resolve parcel and fetch official map sources
         shell: bash
         run: |
           mkdir -p parcel-check
@@ -67,20 +67,39 @@ jobs:
           const width = 1800;
           const height = Math.max(1000, Math.min(3000, Math.round(width * heightM / widthM)));
 
-          const wms = new URL('https://isk.geobasis-bb.de/mapproxy/dop20c/service/wms');
-          wms.searchParams.set('SERVICE', 'WMS');
-          wms.searchParams.set('VERSION', '1.1.1');
-          wms.searchParams.set('REQUEST', 'GetMap');
-          wms.searchParams.set('LAYERS', 'bebb_dop20c');
-          wms.searchParams.set('STYLES', '');
-          wms.searchParams.set('SRS', 'EPSG:4326');
-          wms.searchParams.set('BBOX', `${minLon},${minLat},${maxLon},${maxLat}`);
-          wms.searchParams.set('WIDTH', String(width));
-          wms.searchParams.set('HEIGHT', String(height));
-          wms.searchParams.set('FORMAT', 'image/jpeg');
-          const imageResponse = await fetch(wms);
-          if (!imageResponse.ok) throw new Error(`DOP20c WMS ${imageResponse.status} ${await imageResponse.text()}`);
-          fs.writeFileSync('parcel-check/orthophoto.jpg', Buffer.from(await imageResponse.arrayBuffer()));
+          async function fetchWms(baseUrl, layers, format, output, extra = {}) {
+            const wms = new URL(baseUrl);
+            wms.searchParams.set('SERVICE', 'WMS');
+            wms.searchParams.set('VERSION', '1.1.1');
+            wms.searchParams.set('REQUEST', 'GetMap');
+            wms.searchParams.set('LAYERS', layers);
+            wms.searchParams.set('STYLES', '');
+            wms.searchParams.set('SRS', 'EPSG:4326');
+            wms.searchParams.set('BBOX', `${minLon},${minLat},${maxLon},${maxLat}`);
+            wms.searchParams.set('WIDTH', String(width));
+            wms.searchParams.set('HEIGHT', String(height));
+            wms.searchParams.set('FORMAT', format);
+            for (const [key, value] of Object.entries(extra)) wms.searchParams.set(key, value);
+            const response = await fetch(wms);
+            if (!response.ok) throw new Error(`WMS ${response.status} ${await response.text()}`);
+            fs.writeFileSync(output, Buffer.from(await response.arrayBuffer()));
+            return wms.toString();
+          }
+
+          const orthophotoUrl = await fetchWms(
+            'https://isk.geobasis-bb.de/mapproxy/dop20c/service/wms',
+            'bebb_dop20c',
+            'image/jpeg',
+            'parcel-check/orthophoto.jpg'
+          );
+
+          const bplanUrl = await fetchWms(
+            'https://www.geoportal-teltow.de/isk/telt_bp23',
+            'raster,bp_plan,bp_baugebietsteilflaeche',
+            'image/png',
+            'parcel-check/bplan.png',
+            { TRANSPARENT: 'TRUE' }
+          );
 
           const px = ([x,y]) => [
             (x - minLon) / (maxLon - minLon) * width,
@@ -89,16 +108,18 @@ jobs:
           const points = ring.map(p => px(p).map(v => v.toFixed(1)).join(',')).join(' ');
           const [pointX, pointY] = px(point);
           const scale50 = 50 / widthM * width;
-          const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-            <image href="orthophoto.jpg" x="0" y="0" width="${width}" height="${height}"/>
-            <polygon points="${points}" fill="none" stroke="#ff2020" stroke-width="8"/>
-            <circle cx="${pointX}" cy="${pointY}" r="12" fill="#00ffff" stroke="#000" stroke-width="3"/>
-            <line x1="60" y1="${height-70}" x2="${60+scale50}" y2="${height-70}" stroke="#fff" stroke-width="8"/>
-            <line x1="60" y1="${height-70}" x2="60" y2="${height-55}" stroke="#fff" stroke-width="6"/>
-            <line x1="${60+scale50}" y1="${height-70}" x2="${60+scale50}" y2="${height-55}" stroke="#fff" stroke-width="6"/>
-            <text x="60" y="${height-85}" font-size="34" font-family="sans-serif" fill="#fff" stroke="#000" stroke-width="1">50 m</text>
-          </svg>`;
-          fs.writeFileSync('parcel-check/overlay.svg', svg);
+          function overlay(background, filename) {
+            const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+              <image href="${background}" x="0" y="0" width="${width}" height="${height}"/>
+              <polygon points="${points}" fill="none" stroke="#ff2020" stroke-width="8"/>
+              <circle cx="${pointX}" cy="${pointY}" r="12" fill="#00ffff" stroke="#000" stroke-width="3"/>
+              <line x1="60" y1="${height-70}" x2="${60+scale50}" y2="${height-70}" stroke="#ff2020" stroke-width="8"/>
+              <text x="60" y="${height-85}" font-size="34" font-family="sans-serif" fill="#ff2020">50 m</text>
+            </svg>`;
+            fs.writeFileSync(`parcel-check/${filename}`, svg);
+          }
+          overlay('orthophoto.jpg', 'orthophoto-overlay.svg');
+          overlay('bplan.png', 'bplan-overlay.svg');
 
           const meta = {
             address,
@@ -110,15 +131,18 @@ jobs:
             cadastralAreaM2: parcel.properties?.flaeche,
             bbox: [minLon,minLat,maxLon,maxLat],
             image: {width,height,widthM,heightM},
-            orthophotoSource: 'LGB Brandenburg DOP20c WMS'
+            orthophotoSource: 'LGB Brandenburg DOP20c WMS',
+            bplanSource: 'Stadt Teltow B-27a WMS',
+            orthophotoUrl,
+            bplanUrl
           };
           fs.writeFileSync('parcel-check/meta.json', JSON.stringify(meta, null, 2));
           console.log('RESULT=' + JSON.stringify(meta));
           NODE
 
-      - name: Upload verification image
+      - name: Upload verification images
         uses: actions/upload-artifact@v4
         with:
-          name: teltow-parcel-orthophoto
+          name: teltow-parcel-map-check
           path: parcel-check/
           retention-days: 1
