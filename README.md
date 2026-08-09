@@ -4,15 +4,44 @@ Integration workspace for SIS Platform.
 
 ## BrandenburgVIEWER / B-Plan
 
-The first connector lives in `src/brandenburg/` and provides three pieces:
+The connector in `src/brandenburg/` provides:
 
 1. **XPlan normalization** for `GRZ`, `GRZmin`, `GRZmax`, `GFZ`, `GFZmin`, and `GFZmax`.
-2. **WFS 2.0 point queries** for municipal/Brandenburg B-Plan services that can return GeoJSON.
-3. **Brandenburg Kartenviewer adapter** for `window.MpJsApi` (`addMarker` and `addGeoJSONLayer`).
+2. **Generic WFS 2.0 / GeoJSON point queries** for Brandenburg municipal B-Plan services.
+3. **Brandenburg Kartenviewer adapter** for `window.MpJsApi`.
+4. **A concrete near-Berlin source:** Teltow B-Plan B-27a "Komponistenviertel" using the city's WFS 1.1/GML service for structured metrics and WMS for map display.
 
-The WFS URL and feature type are intentionally configuration values because B-Plan publication in Brandenburg is distributed across different municipal services and not every plan exposes structured XPlan attributes.
+### Near-Berlin example: Teltow B-27a
 
-### Example
+```js
+import {
+  fetchTeltowB27aMetricsAtPoint,
+  waitForMpJsApi,
+  addLocationMarker,
+  showTeltowB27aInViewer
+} from "./src/brandenburg/index.js";
+
+// Use coordinates for a property inside the B-27a plan area.
+const lon = 13.289;
+const lat = 52.389;
+
+const result = await fetchTeltowB27aMetricsAtPoint({ lon, lat });
+
+console.log({
+  grz: result.plan?.grz,
+  gfz: result.plan?.gfz,
+  grzMin: result.plan?.grzMin,
+  grzMax: result.plan?.grzMax,
+  gfzMin: result.plan?.gfzMin,
+  gfzMax: result.plan?.gfzMax
+});
+
+const api = await waitForMpJsApi();
+addLocationMarker({ lon, lat, api, label: "Teltow B-27a" });
+showTeltowB27aInViewer({ api });
+```
+
+### Generic GeoJSON WFS example
 
 ```js
 import {
@@ -30,15 +59,6 @@ const result = await fetchFirstBPlanWithMetrics({
   typeNames: process.env.BB_BPLAN_TYPENAME ?? "xplan:BP_BaugebietsTeilFlaeche",
   lon,
   lat
-});
-
-console.log({
-  grz: result.plan?.grz,
-  gfz: result.plan?.gfz,
-  grzMin: result.plan?.grzMin,
-  grzMax: result.plan?.grzMax,
-  gfzMin: result.plan?.gfzMin,
-  gfzMax: result.plan?.gfzMax
 });
 
 const api = await waitForMpJsApi();
