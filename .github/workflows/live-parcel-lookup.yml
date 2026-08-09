@@ -16,7 +16,7 @@ jobs:
         run: |
           mkdir -p parcel-check
           node <<'NODE'
-          const fs = require('fs');
+          import fs from 'node:fs';
           const address = 'Mahlower Straße 150, 14513 Teltow';
 
           function pointFromWkt(wkt) {
