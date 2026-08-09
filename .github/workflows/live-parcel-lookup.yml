@@ -11,120 +11,114 @@ jobs:
   lookup:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve address and ALKIS parcel
+      - name: Resolve parcel and fetch official orthophoto
         shell: bash
         run: |
+          mkdir -p parcel-check
           node <<'NODE'
+          const fs = require('fs');
           const address = 'Mahlower Straße 150, 14513 Teltow';
 
-          function collectObjects(value, out = []) {
-            if (value && typeof value === 'object') {
-              if (!Array.isArray(value)) out.push(value);
-              for (const child of Object.values(value)) collectObjects(child, out);
-            }
-            return out;
-          }
-
-          function parsePoint(value) {
-            if (!value) return null;
-            if (Array.isArray(value) && value.length >= 2) {
-              const [a, b] = value.map(Number);
-              if (Number.isFinite(a) && Number.isFinite(b)) return [a, b];
-            }
-            if (typeof value === 'object') {
-              if (Array.isArray(value.coordinates)) return parsePoint(value.coordinates);
-              if (Number.isFinite(Number(value.lon)) && Number.isFinite(Number(value.lat))) {
-                return [Number(value.lon), Number(value.lat)];
-              }
-              if (Number.isFinite(Number(value.x)) && Number.isFinite(Number(value.y))) {
-                return [Number(value.x), Number(value.y)];
-              }
-            }
-            const nums = String(value).match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
-            for (let i = 0; i + 1 < nums.length; i++) {
-              const a = nums[i], b = nums[i + 1];
-              if (a >= 10 && a <= 15 && b >= 50 && b <= 55) return [a, b];
-              if (b >= 10 && b <= 15 && a >= 50 && a <= 55) return [b, a];
-            }
-            return null;
+          function pointFromWkt(wkt) {
+            const nums = String(wkt ?? '').match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+            return nums.length >= 2 ? [nums[0], nums[1]] : null;
           }
 
           const searchUrl = new URL('https://search.geobasis-bb.de/v2/search');
           searchUrl.searchParams.set('query', address);
           searchUrl.searchParams.set('limit', '20');
           searchUrl.searchParams.set('complex', 'true');
-
           const searchResponse = await fetch(searchUrl, { headers: { accept: 'application/json' } });
-          if (!searchResponse.ok) throw new Error(`Search API: ${searchResponse.status} ${await searchResponse.text()}`);
+          if (!searchResponse.ok) throw new Error(`Search API ${searchResponse.status}`);
           const search = await searchResponse.json();
-          console.log('SEARCH_RAW=' + JSON.stringify(search));
-
-          const objects = collectObjects(search);
-          const exact = objects.find(o =>
-            String(o.geocodeHausnummer ?? o.houseNumber ?? '').trim() === '150' &&
-            /mahlower/i.test(String(o.geocodeStrassenname ?? o.street ?? o.title ?? ''))
-          ) ?? objects.find(o => /mahlower/i.test(String(o.title ?? '')) && /\b150\b/.test(String(o.title ?? '')));
-
-          const candidatePoints = [
-            exact?.position,
-            exact?.geometry,
-            exact?.coordinates,
-            exact?.location,
-            ...objects.filter(o => /mahlower/i.test(JSON.stringify(o)) && /150/.test(JSON.stringify(o)))
-              .flatMap(o => [o.position, o.geometry, o.coordinates, o.location])
-          ];
-
-          let point = candidatePoints.map(parsePoint).find(Boolean);
-          if (!point) point = [13.28395, 52.39476];
+          const exact = (search.results ?? []).find(r => r.title === address)
+            ?? (search.results ?? []).find(r => /Mahlower Straße 150/i.test(r.title ?? ''));
+          if (!exact) throw new Error('Exact address not found');
+          const point = pointFromWkt(exact.categoryResult?.position ?? exact.geometry);
+          if (!point) throw new Error('Address point missing');
           const [lon, lat] = point;
-          console.log(`ADDRESS_POINT=${lon},${lat}`);
+          const parcelHint = exact.categoryResult?.cadastralParcels?.[0];
+          if (!parcelHint) throw new Error('No cadastral parcel hint');
 
-          const cadastralHints = objects
-            .filter(o => /mahlower/i.test(JSON.stringify(o)) && /150/.test(JSON.stringify(o)))
-            .flatMap(o => [o.cadastralParcels, o.cadastralParcel, o.flurstueck, o.flurstueckskennzeichen])
-            .filter(Boolean);
-          console.log('CADASTRAL_HINTS=' + JSON.stringify(cadastralHints));
-
-          const d = 0.00035;
           const itemsUrl = new URL('https://ogc-api.geobasis-bb.de/alkis-vereinfacht/v1/collections/flurstueck/items');
-          itemsUrl.searchParams.set('bbox', `${lon-d},${lat-d},${lon+d},${lat+d}`);
+          itemsUrl.searchParams.set('bbox', `${lon - 0.002},${lat - 0.002},${lon + 0.002},${lat + 0.002}`);
           itemsUrl.searchParams.set('limit', '100');
           itemsUrl.searchParams.set('f', 'json');
-
           const parcelResponse = await fetch(itemsUrl, { headers: { accept: 'application/geo+json, application/json' } });
-          if (!parcelResponse.ok) throw new Error(`ALKIS API: ${parcelResponse.status} ${await parcelResponse.text()}`);
-          const parcels = await parcelResponse.json();
-          console.log('PARCEL_RAW=' + JSON.stringify(parcels));
+          if (!parcelResponse.ok) throw new Error(`ALKIS API ${parcelResponse.status}`);
+          const collection = await parcelResponse.json();
+          const parcel = (collection.features ?? []).find(f => f.properties?.flstkennz === parcelHint);
+          if (!parcel) throw new Error(`Parcel ${parcelHint} not found`);
 
-          function insideRing(point, ring) {
-            const [x, y] = point;
-            let inside = false;
-            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-              const [xi, yi] = ring[i], [xj, yj] = ring[j];
-              const intersect = ((yi > y) !== (yj > y)) &&
-                (x < (xj - xi) * (y - yi) / ((yj - yi) || Number.EPSILON) + xi);
-              if (intersect) inside = !inside;
-            }
-            return inside;
-          }
+          fs.writeFileSync('parcel-check/parcel.geojson', JSON.stringify({type:'FeatureCollection', features:[parcel]}, null, 2));
 
-          function containsPoint(feature, point) {
-            const g = feature.geometry;
-            if (!g) return false;
-            const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
-            return polys.some(poly => poly[0] && insideRing(point, poly[0]) && !poly.slice(1).some(h => insideRing(point, h)));
-          }
+          const polygons = parcel.geometry.type === 'Polygon' ? [parcel.geometry.coordinates] : parcel.geometry.coordinates;
+          const ring = polygons[0][0];
+          const lons = ring.map(p => p[0]);
+          const lats = ring.map(p => p[1]);
+          const pad = 0.00028;
+          const minLon = Math.min(...lons) - pad;
+          const maxLon = Math.max(...lons) + pad;
+          const minLat = Math.min(...lats) - pad;
+          const maxLat = Math.max(...lats) + pad;
+          const meanLat = (minLat + maxLat) / 2;
+          const widthM = (maxLon - minLon) * 111320 * Math.cos(meanLat * Math.PI / 180);
+          const heightM = (maxLat - minLat) * 110540;
+          const width = 1800;
+          const height = Math.max(1000, Math.min(3000, Math.round(width * heightM / widthM)));
 
-          const features = parcels.features ?? [];
-          const candidates = features.map(f => ({ contains: containsPoint(f, point), id: f.id, ...f.properties }));
-          console.log('PARCEL_CANDIDATES=' + JSON.stringify(candidates));
+          const wms = new URL('https://isk.geobasis-bb.de/mapproxy/dop20c/service/wms');
+          wms.searchParams.set('SERVICE', 'WMS');
+          wms.searchParams.set('VERSION', '1.1.1');
+          wms.searchParams.set('REQUEST', 'GetMap');
+          wms.searchParams.set('LAYERS', 'bebb_dop20c');
+          wms.searchParams.set('STYLES', '');
+          wms.searchParams.set('SRS', 'EPSG:4326');
+          wms.searchParams.set('BBOX', `${minLon},${minLat},${maxLon},${maxLat}`);
+          wms.searchParams.set('WIDTH', String(width));
+          wms.searchParams.set('HEIGHT', String(height));
+          wms.searchParams.set('FORMAT', 'image/jpeg');
+          const imageResponse = await fetch(wms);
+          if (!imageResponse.ok) throw new Error(`DOP20c WMS ${imageResponse.status} ${await imageResponse.text()}`);
+          fs.writeFileSync('parcel-check/orthophoto.jpg', Buffer.from(await imageResponse.arrayBuffer()));
 
-          const hintText = JSON.stringify(cadastralHints).replace(/\s/g, '').toLowerCase();
-          const parcel = features.find(f => containsPoint(f, point))
-            ?? features.find(f => hintText && Object.values(f.properties ?? {}).some(v => hintText.includes(String(v).replace(/\s/g, '').toLowerCase())))
-            ?? features.find(f => /mahlower/i.test(JSON.stringify(f.properties ?? {})) && /150/.test(JSON.stringify(f.properties ?? {})));
+          const px = ([x,y]) => [
+            (x - minLon) / (maxLon - minLon) * width,
+            (maxLat - y) / (maxLat - minLat) * height
+          ];
+          const points = ring.map(p => px(p).map(v => v.toFixed(1)).join(',')).join(' ');
+          const [pointX, pointY] = px(point);
+          const scale50 = 50 / widthM * width;
+          const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+            <image href="orthophoto.jpg" x="0" y="0" width="${width}" height="${height}"/>
+            <polygon points="${points}" fill="none" stroke="#ff2020" stroke-width="8"/>
+            <circle cx="${pointX}" cy="${pointY}" r="12" fill="#00ffff" stroke="#000" stroke-width="3"/>
+            <line x1="60" y1="${height-70}" x2="${60+scale50}" y2="${height-70}" stroke="#fff" stroke-width="8"/>
+            <line x1="60" y1="${height-70}" x2="60" y2="${height-55}" stroke="#fff" stroke-width="6"/>
+            <line x1="${60+scale50}" y1="${height-70}" x2="${60+scale50}" y2="${height-55}" stroke="#fff" stroke-width="6"/>
+            <text x="60" y="${height-85}" font-size="34" font-family="sans-serif" fill="#fff" stroke="#000" stroke-width="1">50 m</text>
+          </svg>`;
+          fs.writeFileSync('parcel-check/overlay.svg', svg);
 
-          if (!parcel) throw new Error('No matching ALKIS parcel found at address point');
-          const p = parcel.properties ?? {};
-          console.log('RESULT=' + JSON.stringify({ address, lon, lat, featureId: parcel.id, properties: p }));
+          const meta = {
+            address,
+            point: {lon, lat},
+            flstkennz: parcel.properties?.flstkennz,
+            gemarkung: parcel.properties?.gemarkung,
+            flur: parcel.properties?.flur,
+            flurstueck: parcel.properties?.flstnrzae,
+            cadastralAreaM2: parcel.properties?.flaeche,
+            bbox: [minLon,minLat,maxLon,maxLat],
+            image: {width,height,widthM,heightM},
+            orthophotoSource: 'LGB Brandenburg DOP20c WMS'
+          };
+          fs.writeFileSync('parcel-check/meta.json', JSON.stringify(meta, null, 2));
+          console.log('RESULT=' + JSON.stringify(meta));
           NODE
+
+      - name: Upload verification image
+        uses: actions/upload-artifact@v4
+        with:
+          name: teltow-parcel-orthophoto
+          path: parcel-check/
+          retention-days: 1
