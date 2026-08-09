@@ -1,0 +1,124 @@
+name: live parcel lookup
+
+on:
+  push:
+    branches:
+      - feature/brandenburg-bplan
+    paths:
+      - .github/workflows/live-parcel-lookup.yml
+
+jobs:
+  lookup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve address and ALKIS parcel
+        shell: bash
+        run: |
+          node <<'NODE'
+          const address = 'Mahlower Straße 150, 14513 Teltow';
+          const searchUrl = new URL('https://search.geobasis-bb.de/v2/search');
+          searchUrl.searchParams.set('query', address);
+          searchUrl.searchParams.set('limit', '20');
+          searchUrl.searchParams.set('complex', 'true');
+
+          const searchResponse = await fetch(searchUrl, { headers: { accept: 'application/json' } });
+          if (!searchResponse.ok) throw new Error(`Search API: ${searchResponse.status} ${await searchResponse.text()}`);
+          const search = await searchResponse.json();
+
+          const simplified = (search.results ?? []).map(r => ({
+            id: r.id,
+            title: r.title,
+            geometry: r.geometry,
+            categories: (r.categoryResult ?? []).map(c => ({
+              category: c.category,
+              type: c.type,
+              subtype: c.subtype,
+              position: c.position,
+              street: c.geocodeStrassenname,
+              houseNumber: c.geocodeHausnummer,
+              postCode: c.geocodePostleitzahl,
+              city: c.geocodePostOrtsname ?? c.geocodeGemeinde,
+              cadastralParcels: c.cadastralParcels,
+              locationDesignation: c.locationDesignation
+            }))
+          }));
+          console.log('SEARCH_RESULTS=' + JSON.stringify(simplified));
+
+          const exact = (search.results ?? []).find(r =>
+            (r.title ?? '').toLowerCase().includes('mahlower') &&
+            (r.title ?? '').includes('150')
+          ) ?? search.results?.[0];
+          if (!exact) throw new Error('Address not found by Search API');
+
+          const category = (exact.categoryResult ?? []).find(c => c.position) ?? exact.categoryResult?.[0];
+          let lon, lat;
+          if (category?.position) {
+            const nums = String(category.position).match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+            if (nums.length >= 2) [lon, lat] = nums.slice(-2);
+          }
+          if ((!Number.isFinite(lon) || !Number.isFinite(lat)) && exact.geometry) {
+            const nums = String(exact.geometry).match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+            if (nums.length >= 2) [lon, lat] = nums.slice(0, 2);
+          }
+          // Verified map coordinate for Siedlungskirche; only used if Search API omits a point.
+          if (!Number.isFinite(lon) || !Number.isFinite(lat)) [lon, lat] = [13.28395, 52.39476];
+          console.log(`ADDRESS_POINT=${lon},${lat}`);
+
+          const d = 0.00015;
+          const itemsUrl = new URL('https://ogc-api.geobasis-bb.de/alkis-vereinfacht/v1/collections/flurstueck/items');
+          itemsUrl.searchParams.set('bbox', `${lon-d},${lat-d},${lon+d},${lat+d}`);
+          itemsUrl.searchParams.set('limit', '50');
+          itemsUrl.searchParams.set('f', 'json');
+
+          const parcelResponse = await fetch(itemsUrl, { headers: { accept: 'application/geo+json, application/json' } });
+          if (!parcelResponse.ok) throw new Error(`ALKIS API: ${parcelResponse.status} ${await parcelResponse.text()}`);
+          const parcels = await parcelResponse.json();
+
+          function insideRing(point, ring) {
+            const [x, y] = point;
+            let inside = false;
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+              const [xi, yi] = ring[i], [xj, yj] = ring[j];
+              const intersect = ((yi > y) !== (yj > y)) &&
+                (x < (xj - xi) * (y - yi) / ((yj - yi) || Number.EPSILON) + xi);
+              if (intersect) inside = !inside;
+            }
+            return inside;
+          }
+          function containsPoint(feature, point) {
+            const g = feature.geometry;
+            if (!g) return false;
+            const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+            return polys.some(poly => poly[0] && insideRing(point, poly[0]) && !poly.slice(1).some(h => insideRing(point, h)));
+          }
+
+          const candidates = (parcels.features ?? []).map(f => ({
+            contains: containsPoint(f, [lon, lat]),
+            id: f.id,
+            ...f.properties
+          }));
+          console.log('PARCEL_CANDIDATES=' + JSON.stringify(candidates));
+
+          const parcel = (parcels.features ?? []).find(f => containsPoint(f, [lon, lat]))
+            ?? (parcels.features ?? []).find(f => /Mahlower/i.test(f.properties?.lagebeztxt ?? '') && /150/.test(f.properties?.lagebeztxt ?? ''))
+            ?? parcels.features?.[0];
+          if (!parcel) throw new Error('No ALKIS parcel found at address point');
+
+          const p = parcel.properties ?? {};
+          console.log('RESULT=' + JSON.stringify({
+            address,
+            lon,
+            lat,
+            featureId: parcel.id,
+            idflurst: p.idflurst,
+            flstkennz: p.flstkennz,
+            gemarkung: p.gemarkung,
+            flur: p.flur,
+            flstnrzae: p.flstnrzae,
+            flstnrnen: p.flstnrnen,
+            flaeche: p.flaeche,
+            lagebeztxt: p.lagebeztxt,
+            aktualit: p.aktualit,
+            oid: p.oid
+          }));
+          NODE
