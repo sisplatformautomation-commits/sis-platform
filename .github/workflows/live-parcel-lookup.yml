@@ -16,6 +16,39 @@ jobs:
         run: |
           node <<'NODE'
           const address = 'Mahlower Straße 150, 14513 Teltow';
+
+          function collectObjects(value, out = []) {
+            if (value && typeof value === 'object') {
+              if (!Array.isArray(value)) out.push(value);
+              for (const child of Object.values(value)) collectObjects(child, out);
+            }
+            return out;
+          }
+
+          function parsePoint(value) {
+            if (!value) return null;
+            if (Array.isArray(value) && value.length >= 2) {
+              const [a, b] = value.map(Number);
+              if (Number.isFinite(a) && Number.isFinite(b)) return [a, b];
+            }
+            if (typeof value === 'object') {
+              if (Array.isArray(value.coordinates)) return parsePoint(value.coordinates);
+              if (Number.isFinite(Number(value.lon)) && Number.isFinite(Number(value.lat))) {
+                return [Number(value.lon), Number(value.lat)];
+              }
+              if (Number.isFinite(Number(value.x)) && Number.isFinite(Number(value.y))) {
+                return [Number(value.x), Number(value.y)];
+              }
+            }
+            const nums = String(value).match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+            for (let i = 0; i + 1 < nums.length; i++) {
+              const a = nums[i], b = nums[i + 1];
+              if (a >= 10 && a <= 15 && b >= 50 && b <= 55) return [a, b];
+              if (b >= 10 && b <= 15 && a >= 50 && a <= 55) return [b, a];
+            }
+            return null;
+          }
+
           const searchUrl = new URL('https://search.geobasis-bb.de/v2/search');
           searchUrl.searchParams.set('query', address);
           searchUrl.searchParams.set('limit', '20');
@@ -24,55 +57,44 @@ jobs:
           const searchResponse = await fetch(searchUrl, { headers: { accept: 'application/json' } });
           if (!searchResponse.ok) throw new Error(`Search API: ${searchResponse.status} ${await searchResponse.text()}`);
           const search = await searchResponse.json();
+          console.log('SEARCH_RAW=' + JSON.stringify(search));
 
-          const simplified = (search.results ?? []).map(r => ({
-            id: r.id,
-            title: r.title,
-            geometry: r.geometry,
-            categories: (r.categoryResult ?? []).map(c => ({
-              category: c.category,
-              type: c.type,
-              subtype: c.subtype,
-              position: c.position,
-              street: c.geocodeStrassenname,
-              houseNumber: c.geocodeHausnummer,
-              postCode: c.geocodePostleitzahl,
-              city: c.geocodePostOrtsname ?? c.geocodeGemeinde,
-              cadastralParcels: c.cadastralParcels,
-              locationDesignation: c.locationDesignation
-            }))
-          }));
-          console.log('SEARCH_RESULTS=' + JSON.stringify(simplified));
+          const objects = collectObjects(search);
+          const exact = objects.find(o =>
+            String(o.geocodeHausnummer ?? o.houseNumber ?? '').trim() === '150' &&
+            /mahlower/i.test(String(o.geocodeStrassenname ?? o.street ?? o.title ?? ''))
+          ) ?? objects.find(o => /mahlower/i.test(String(o.title ?? '')) && /\b150\b/.test(String(o.title ?? '')));
 
-          const exact = (search.results ?? []).find(r =>
-            (r.title ?? '').toLowerCase().includes('mahlower') &&
-            (r.title ?? '').includes('150')
-          ) ?? search.results?.[0];
-          if (!exact) throw new Error('Address not found by Search API');
+          const candidatePoints = [
+            exact?.position,
+            exact?.geometry,
+            exact?.coordinates,
+            exact?.location,
+            ...objects.filter(o => /mahlower/i.test(JSON.stringify(o)) && /150/.test(JSON.stringify(o)))
+              .flatMap(o => [o.position, o.geometry, o.coordinates, o.location])
+          ];
 
-          const category = (exact.categoryResult ?? []).find(c => c.position) ?? exact.categoryResult?.[0];
-          let lon, lat;
-          if (category?.position) {
-            const nums = String(category.position).match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
-            if (nums.length >= 2) [lon, lat] = nums.slice(-2);
-          }
-          if ((!Number.isFinite(lon) || !Number.isFinite(lat)) && exact.geometry) {
-            const nums = String(exact.geometry).match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
-            if (nums.length >= 2) [lon, lat] = nums.slice(0, 2);
-          }
-          // Verified map coordinate for Siedlungskirche; only used if Search API omits a point.
-          if (!Number.isFinite(lon) || !Number.isFinite(lat)) [lon, lat] = [13.28395, 52.39476];
+          let point = candidatePoints.map(parsePoint).find(Boolean);
+          if (!point) point = [13.28395, 52.39476];
+          const [lon, lat] = point;
           console.log(`ADDRESS_POINT=${lon},${lat}`);
 
-          const d = 0.00015;
+          const cadastralHints = objects
+            .filter(o => /mahlower/i.test(JSON.stringify(o)) && /150/.test(JSON.stringify(o)))
+            .flatMap(o => [o.cadastralParcels, o.cadastralParcel, o.flurstueck, o.flurstueckskennzeichen])
+            .filter(Boolean);
+          console.log('CADASTRAL_HINTS=' + JSON.stringify(cadastralHints));
+
+          const d = 0.00035;
           const itemsUrl = new URL('https://ogc-api.geobasis-bb.de/alkis-vereinfacht/v1/collections/flurstueck/items');
           itemsUrl.searchParams.set('bbox', `${lon-d},${lat-d},${lon+d},${lat+d}`);
-          itemsUrl.searchParams.set('limit', '50');
+          itemsUrl.searchParams.set('limit', '100');
           itemsUrl.searchParams.set('f', 'json');
 
           const parcelResponse = await fetch(itemsUrl, { headers: { accept: 'application/geo+json, application/json' } });
           if (!parcelResponse.ok) throw new Error(`ALKIS API: ${parcelResponse.status} ${await parcelResponse.text()}`);
           const parcels = await parcelResponse.json();
+          console.log('PARCEL_RAW=' + JSON.stringify(parcels));
 
           function insideRing(point, ring) {
             const [x, y] = point;
@@ -85,6 +107,7 @@ jobs:
             }
             return inside;
           }
+
           function containsPoint(feature, point) {
             const g = feature.geometry;
             if (!g) return false;
@@ -92,33 +115,16 @@ jobs:
             return polys.some(poly => poly[0] && insideRing(point, poly[0]) && !poly.slice(1).some(h => insideRing(point, h)));
           }
 
-          const candidates = (parcels.features ?? []).map(f => ({
-            contains: containsPoint(f, [lon, lat]),
-            id: f.id,
-            ...f.properties
-          }));
+          const features = parcels.features ?? [];
+          const candidates = features.map(f => ({ contains: containsPoint(f, point), id: f.id, ...f.properties }));
           console.log('PARCEL_CANDIDATES=' + JSON.stringify(candidates));
 
-          const parcel = (parcels.features ?? []).find(f => containsPoint(f, [lon, lat]))
-            ?? (parcels.features ?? []).find(f => /Mahlower/i.test(f.properties?.lagebeztxt ?? '') && /150/.test(f.properties?.lagebeztxt ?? ''))
-            ?? parcels.features?.[0];
-          if (!parcel) throw new Error('No ALKIS parcel found at address point');
+          const hintText = JSON.stringify(cadastralHints).replace(/\s/g, '').toLowerCase();
+          const parcel = features.find(f => containsPoint(f, point))
+            ?? features.find(f => hintText && Object.values(f.properties ?? {}).some(v => hintText.includes(String(v).replace(/\s/g, '').toLowerCase())))
+            ?? features.find(f => /mahlower/i.test(JSON.stringify(f.properties ?? {})) && /150/.test(JSON.stringify(f.properties ?? {})));
 
+          if (!parcel) throw new Error('No matching ALKIS parcel found at address point');
           const p = parcel.properties ?? {};
-          console.log('RESULT=' + JSON.stringify({
-            address,
-            lon,
-            lat,
-            featureId: parcel.id,
-            idflurst: p.idflurst,
-            flstkennz: p.flstkennz,
-            gemarkung: p.gemarkung,
-            flur: p.flur,
-            flstnrzae: p.flstnrzae,
-            flstnrnen: p.flstnrnen,
-            flaeche: p.flaeche,
-            lagebeztxt: p.lagebeztxt,
-            aktualit: p.aktualit,
-            oid: p.oid
-          }));
+          console.log('RESULT=' + JSON.stringify({ address, lon, lat, featureId: parcel.id, properties: p }));
           NODE
