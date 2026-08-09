@@ -1,0 +1,109 @@
+name: scan high GFZ parcels
+
+on:
+  push:
+    branches: [feature/brandenburg-bplan]
+    paths: [.github/workflows/scan-high-gfz-parcels.yml]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scan Teltow B-Plan 8
+        shell: bash
+        run: |
+          node <<'NODE'
+          const endpoint = 'https://www.geoportal-teltow.de/isk/telt_bp61';
+          const wfs = new URL(endpoint);
+          wfs.searchParams.set('service','WFS');
+          wfs.searchParams.set('version','1.1.0');
+          wfs.searchParams.set('request','GetFeature');
+          wfs.searchParams.set('typeName','ms:bp_baugebietsteilflaeche');
+          wfs.searchParams.set('srsName','EPSG:4326');
+          wfs.searchParams.set('maxFeatures','500');
+          const res = await fetch(wfs, {headers:{accept:'application/gml+xml,text/xml'}});
+          const xml = await res.text();
+          if (!res.ok) throw new Error(`WFS ${res.status}: ${xml.slice(0,500)}`);
+
+          function textProp(body, name) {
+            const m = new RegExp(`<(?:[\\w.-]+:)?${name}\\b[^>]*>\\s*([^<]+)`, 'i').exec(body);
+            return m ? m[1].trim() : null;
+          }
+          function parseRing(body) {
+            const pm = /<(?:[\w.-]+:)?posList\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?posList>/i.exec(body);
+            if (!pm) return null;
+            const nums = pm[1].trim().split(/\s+/).map(Number).filter(Number.isFinite);
+            const ring = [];
+            for (let i=0;i+1<nums.length;i+=2) {
+              const a=nums[i], b=nums[i+1];
+              if (a > 40 && a < 60 && b > 5 && b < 20) ring.push([b,a]);
+              else ring.push([a,b]);
+            }
+            return ring.length >= 4 ? ring : null;
+          }
+          function pointInRing([x,y], ring) {
+            let inside=false;
+            for (let i=0,j=ring.length-1;i<ring.length;j=i++) {
+              const [xi,yi]=ring[i], [xj,yj]=ring[j];
+              const hit=((yi>y)!==(yj>y)) && x < (xj-xi)*(y-yi)/((yj-yi)||Number.EPSILON)+xi;
+              if (hit) inside=!inside;
+            }
+            return inside;
+          }
+          function centroid(geom) {
+            const ring = geom?.type === 'Polygon' ? geom.coordinates?.[0] : geom?.type === 'MultiPolygon' ? geom.coordinates?.[0]?.[0] : null;
+            if (!ring?.length) return null;
+            const pts = ring.slice(0,-1);
+            return [pts.reduce((s,p)=>s+p[0],0)/pts.length, pts.reduce((s,p)=>s+p[1],0)/pts.length];
+          }
+
+          const features=[];
+          const rx=/<(?:[\w.-]+:)?bp_baugebietsteilflaeche\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?bp_baugebietsteilflaeche>/gi;
+          for (const m of xml.matchAll(rx)) {
+            const body=m[1];
+            const gfz=Number(textProp(body,'GFZ'));
+            const grz=Number(textProp(body,'GRZ'));
+            const ring=parseRing(body);
+            if (Number.isFinite(gfz) && gfz > 1 && ring) {
+              const xs=ring.map(p=>p[0]), ys=ring.map(p=>p[1]);
+              features.push({gfz,grz:Number.isFinite(grz)?grz:null,ring,bbox:[Math.min(...xs),Math.min(...ys),Math.max(...xs),Math.max(...ys)]});
+            }
+          }
+          console.log('HIGH_GFZ_FEATURES=' + JSON.stringify(features.map(f=>({gfz:f.gfz,grz:f.grz,bbox:f.bbox,vertices:f.ring.length}))));
+          if (!features.length) process.exit(0);
+
+          const minLon=Math.min(...features.map(f=>f.bbox[0])), minLat=Math.min(...features.map(f=>f.bbox[1]));
+          const maxLon=Math.max(...features.map(f=>f.bbox[2])), maxLat=Math.max(...features.map(f=>f.bbox[3]));
+          const alkis=new URL('https://ogc-api.geobasis-bb.de/alkis-vereinfacht/v1/collections/flurstueck/items');
+          alkis.searchParams.set('bbox',`${minLon},${minLat},${maxLon},${maxLat}`);
+          alkis.searchParams.set('limit','1000');
+          alkis.searchParams.set('f','json');
+          const ar=await fetch(alkis,{headers:{accept:'application/geo+json,application/json'}});
+          const aj=await ar.json();
+          if (!ar.ok) throw new Error(`ALKIS ${ar.status}: ${JSON.stringify(aj).slice(0,500)}`);
+          console.log(`ALKIS_RETURNED=${aj.features?.length ?? 0}`);
+
+          const candidates=[];
+          for (const parcel of aj.features ?? []) {
+            const area=Number(parcel.properties?.flaeche);
+            if (!(area>=800 && area<=1200)) continue;
+            const c=centroid(parcel.geometry);
+            if (!c) continue;
+            const hit=features.find(f=>pointInRing(c,f.ring));
+            if (!hit) continue;
+            const p=parcel.properties ?? {};
+            candidates.push({
+              areaM2: area,
+              gfz: hit.gfz,
+              grz: hit.grz,
+              flstkennz:p.flstkennz,
+              gemarkung:p.gemarkung,
+              flur:p.flur,
+              flurstueck:[p.flstnrzae,p.flstnrnen].filter(v=>v!==null&&v!==undefined&&v!=='').join('/'),
+              lage:p.lagebeztxt ?? null,
+              centroid:c
+            });
+          }
+          candidates.sort((a,b)=>Math.abs(a.areaM2-1000)-Math.abs(b.areaM2-1000));
+          console.log('CANDIDATES=' + JSON.stringify(candidates));
+          NODE
