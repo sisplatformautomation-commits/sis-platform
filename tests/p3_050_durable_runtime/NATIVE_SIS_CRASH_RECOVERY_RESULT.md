@@ -2,44 +2,35 @@
 
 Date: 2026-08-11 (Europe/Berlin)
 
-Scope: hardened P3-049 durability semantics (`Supabase + Agents RunState`) before selecting Temporal or Restate.
+Scope: `P3-049 + Supabase + Agents RunState`, after introduction of the P3-049 atomic HITL resolution claim.
 
 Safety invariants: TEST only; no Gmail/Make/provider write; no PROD change; no external financial write.
 
-## Hardening implemented
-
-1. Replay-safe evidence-effect ledger keyed by a stable SHA-256 action fingerprint. A retry after commit-before-ack returns the previously committed result rather than executing the effect again.
-2. Approval lease fields on durable HITL runs plus a service-role-only expiry sweeper and controlled recovery RPC. Expiry never approves or executes the action; the serialized RunState remains persisted.
-3. TEST `pg_cron` sweeper runs every five minutes.
-4. `sis-agent-hitl-test` version 5 uses the new ledger and lease semantics while keeping P3-048 as the authorization decision source.
-
 ## Result
 
-**5 of 5 critical cases pass.**
+The native durability suite remains **5/5 PASS** after the concurrency fix.
 
-1. `pause_process_exit_then_resume` — PASS. Serialized state survives a process boundary and resumes.
-2. `resume_after_runtime_version_change` — PASS. Compatible persisted state resumes after runtime version change.
-3. `duplicate_approval_idempotency` — PASS. A second resolution is rejected and the evidence effect remains exactly once.
-4. `crash_after_effect_commit_before_ack` — PASS. The committed effect is retained exactly once; retry returns replayed success and the pending run finalizes normally.
-5. `orphan_pending_timeout_recovery` — PASS. An expired pending approval is marked `expired_recoverable` without changing approval or RunState; controlled recovery issues a new lease and the run can later resolve normally.
+1. `pause_process_exit_then_resume` — PASS. Persisted pending state can be claimed and completed in a later transaction/process boundary.
+2. `resume_after_runtime_version_change` — PASS. A state marked as originating from the prior runtime version completed under Edge function version 6 without changing the durable contract.
+3. `duplicate_approval_idempotency` — PASS. Repeating the same approve decision returns the same resolution claim; effect/finalize are idempotent.
+4. `crash_after_effect_commit_before_ack` — PASS. After the effect committed and finalization was intentionally omitted, re-entry returned the same approve claim, replayed the existing effect, and finalized normally. Exactly one effect row remained with replay count 1 and tool execution count 1.
+5. `orphan_pending_timeout_recovery` — PASS. The real TEST `pg_cron` sweeper marked the expired fixture `expired_recoverable` before the manual sweep ran. RunState was preserved, controlled recovery issued a new lease, and the run was subsequently rejected with zero effects.
 
-## Live TEST evidence for the two former gaps
+## Concurrency regression
 
-- Effect commit transaction: `replay=false`, one ledger row, tool execution count 1.
-- Separate retry transaction: `replay=true`, still one ledger row, replay count 1, tool execution count still 1.
-- Expiry sweep: pending run moved from recovery state `active` to `expired_recoverable`; serialized state remained present; tool execution count remained 0.
-- Recovery: recovery state returned to `active`, recovery count incremented, new lease issued; no approval was granted by recovery.
-- All dedicated DB fixtures were deleted after verification; ledger fixture residue is zero.
+The new decision serialization is also verified:
 
-## Security
+- `approve_then_reject_single_winner` — PASS. Approve claim created; later Reject returned `RESOLUTION_ALREADY_CLAIMED`; final state `approved_resumed`; exactly one effect.
+- `reject_then_approve_single_winner` — PASS. Reject claim created; later Approve returned `RESOLUTION_ALREADY_CLAIMED`; final state `rejected_resumed`; zero effects.
+- `same_approve_idempotent` — PASS. Second Approve returned the same claim id; duplicate effect was replay-only; duplicate finalization was idempotent.
+- `fingerprint_mismatch_rejected` — PASS. The compatibility effect RPC rejected a non-canonical fingerprint with `HITL_ACTION_FINGERPRINT_NOT_CANONICAL`.
 
-- `sis_agent_hitl_effect_ledger`: RLS enabled, no permissive policies, no `anon` or `authenticated` SELECT.
-- `sis_agent_hitl_effect_commit_v1`, `sis_agent_hitl_sweep_expired_v1`, and `sis_agent_hitl_recover_expired_v1`: service-role-only.
-- Security Advisor added no new P3-050 WARN. The ledger has the intentional `rls_enabled_no_policy` INFO for deny-by-default access.
-- Provider/Gmail write flags remain constrained to false in the TEST durability ledger.
+## Architecture consequence
 
-## Interpretation
+The resolution decision is now durably claimed before `RunState.approve()` or `RunState.reject()` is applied. P3-050 binds its effect ledger to the same approve claim and server-derived canonical action fingerprint. A Reject claim can never commit an effect through the durability RPC.
 
-The current critical durability bar is met natively by SIS for this evidence-only HITL workflow. P3-050 therefore does **not** currently justify adding Temporal or Restate as a required runtime layer. The external-engine harness remains in the branch as a fallback benchmark if future workflows exceed the native durability envelope.
+The current SIS-native durability bar therefore remains satisfied. Temporal and Restate remain fallback evaluation assets rather than required runtime dependencies.
 
-Important boundary: this result proves replay safety for the internal evidence-only action used by P3-049. Real external provider writes still require provider/action-specific idempotency semantics before claiming exactly-once external side effects.
+## Boundary
+
+The evidence-only effect is internal and constrained to `provider_write_performed=false` / `mail_write_performed=false`. Real external provider writes still require provider/action-specific idempotency semantics before claiming exactly-once external behavior.
