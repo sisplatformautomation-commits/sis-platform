@@ -1,28 +1,26 @@
 # P3-043 – Guarded Make Inventory DEV/TEST
 
-Status: implemented in TEST execution plane, DEV/TEST contract active, PROD not promoted.
+Status: DEV/TEST implementation verified end-to-end. PROD not promoted.
 
-## Purpose
+## Architecture
 
-Provide a guarded Make provider-read path for SIS workers without exposing arbitrary provider URLs, provider credentials, provider writes, or production promotion.
+The runtime and provider credential are intentionally separated.
 
-## Runtime flow
+1. `sis.worker.integration` authenticates in the TEST execution plane using its role-specific Supabase Auth subject.
+2. `sis-provider-make-read-dev` or `sis-provider-make-read-test` fixes the environment and validates the active runtime binding plus resource/operation allowlist through `sis_gpt_action_authorize_v1`.
+3. The worker JWT is forwarded to the central `sis-make-inventory-broker`.
+4. The broker independently validates that JWT against the source Supabase Auth `/auth/v1/user` endpoint.
+5. The central subject allowlist requires the exact integration-worker subject for the requested environment.
+6. `sis_make_inventory_broker_v1` executes only registered Make GET operations using the Make credential held exclusively in the central Vault.
+7. Sanitized provider output is returned; credentials, raw blueprint content and webhook URLs are not returned.
+8. Every central broker invocation is written to `sis_make_inventory_broker_audit`.
 
-1. A role-specific `sis.worker.integration` runtime authenticates with its bound Supabase Auth subject.
-2. The environment-specific Edge Function fixes the environment (`dev` or `test`) and forwards only `resource_key`, `operation`, and structured params.
-3. `public.sis_gpt_action_dispatch_v1` resolves the active runtime binding and requires `sis.worker.integration`.
-4. The dispatcher resolves an active resource in `public.sis_gpt_action_resources` for the same environment.
-5. The requested operation must be explicitly included in the resource's `allowed_operations`.
-6. Only the `make_inventory_read_v1` guard profile is accepted for inventory resources.
-7. Provider operations use GET only. Provider write, financial write, PROD access, arbitrary URLs, and cross-environment access are rejected.
-8. Every provider attempt is recorded in `public.sis_gpt_action_invocations`. Provider failures are audited and fail closed.
-
-## Registered resources
+## Resources
 
 - `make.inventory.dev.sis_platform`
 - `make.inventory.test.sis_platform`
 
-Both resources allow only:
+Allowed operations:
 
 - `list_organization`
 - `list_teams`
@@ -32,37 +30,45 @@ Both resources allow only:
 - `read_connections_metadata`
 - `read_webhook_and_schedule_metadata`
 
-## Edge gateways
+No scenario run/start/stop/update, connection write, webhook write, provider write, external financial write or PROD change is allowed.
 
-- `sis-provider-make-read-dev`
-- `sis-provider-make-read-test`
+## Credential boundary
 
-Both require JWT verification. Environment selection is fixed in the function and cannot be supplied by the caller.
+`make_eu1_api_token` remains only in the central control-plane Vault. It is not copied to the execution-plane Vault and is never returned to the model or worker. The central broker uses it only after both source-JWT verification and subject/environment/resource guards have passed.
 
-## Safety properties
+## Environment scope
 
-- Worker identity comes from `auth.uid()` and active runtime binding.
-- Only `sis.worker.integration` can dispatch provider reads.
-- Runtime environment must equal requested resource environment.
-- No free-form Make URL can be supplied.
-- No Make token is returned to workers or model context.
-- Connection and webhook inventory output omits secret material.
-- Blueprint inventory is sanitized before return.
-- PROD scenarios are excluded from DEV/TEST inventory scope.
-- Provider writes and external financial writes are prohibited.
-- PROD promotion requires a separate explicit approval.
+The Make team is shared historically, so environment safety is based on explicit scenario naming markers rather than team membership.
 
-## Verification completed
+DEV accepts only scenario names beginning `DEV |` or containing `| DEV |`.
+TEST accepts only scenario names beginning `TEST |` or containing `| TEST |`.
+PROD scenarios and incidental words such as `Testbeleg` do not match.
 
-- Active DEV integration subject resolves only to DEV resource.
-- Cross-environment dispatch is rejected.
-- Non-allowlisted operations are rejected.
-- Missing Make credential in TEST fails closed as `MAKE_TOKEN_MISSING`.
-- The missing-credential case creates an audited failed invocation with `provider_write_allowed=false` and `external_financial_writes=false`.
-- The existing Make credential in the central control plane was used only to verify the Make `/organizations` GET endpoint; no provider mutation was performed.
+## End-to-end verification
 
-## Current deployment note
+Verified chain:
 
-The TEST execution plane intentionally does not currently hold `make_eu1_api_token`. Therefore the guarded provider code is installed and security-verified, but a real Make inventory call from the TEST runtime remains blocked until an approved secret-placement/runtime-bridge design makes the provider credential available without exposing it to the model.
+`worker credential in Vault -> Auth login -> JWT Edge Gateway -> execution-plane resource guard -> cross-project broker -> source JWT validation -> central subject allowlist -> central Vault Make credential -> Make GET -> sanitized response`
 
-This is a DEV/TEST implementation only. Do not merge or promote this contract to PROD without separate explicit approval.
+Results:
+
+- DEV authentication HTTP 200, provider gateway HTTP 200, 13 DEV scenarios returned.
+- TEST authentication HTTP 200, provider gateway HTTP 200, exactly 1 TEST scenario returned.
+- PROD scenario leak count: 0.
+- `TEMP - Testbeleg...` leak count: 0 after scope hardening.
+- Organization inventory: passed (1 organization).
+- Team inventory: passed (1 team).
+- Connection metadata inventory: passed (11 sanitized connections).
+- Hook metadata inventory: passed (3 hooks, URLs omitted).
+- Scenario metadata read: passed.
+- Blueprint read: passed; raw blueprint is not returned, only content hash and module count.
+- Cross-environment subject access: denied.
+- Non-allowlisted operation: denied.
+- Provider writes performed: none.
+- External financial writes performed: none.
+
+The temporary E2E regression RPC used to validate credential/JWT flow was removed after verification.
+
+## Promotion
+
+This implementation is authorized for DEV/TEST only. PR review/merge may canonicalize the contract, but PROD provider activation or promotion requires a separate explicit user approval.
