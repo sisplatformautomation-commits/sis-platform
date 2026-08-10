@@ -1,0 +1,91 @@
+version: 1.0.0
+work_item: P3-043
+contract: sis_make_inventory_read_v1
+provider: make
+environments:
+  - dev
+  - test
+production_enabled: false
+
+principles:
+  provider_read_only: true
+  provider_write_allowed: false
+  external_financial_writes: false
+  free_form_provider_urls: false
+  resource_key_required: true
+  runtime_identity_from_auth_subject: true
+  integration_worker_only: true
+  cross_environment_access: false
+  direct_registry_table_access: false
+  model_secret_visibility: never
+
+resources:
+  dev:
+    resource_key: make.inventory.dev.sis_platform
+    edge_gateway: sis-provider-make-read-dev
+  test:
+    resource_key: make.inventory.test.sis_platform
+    edge_gateway: sis-provider-make-read-test
+
+allowed_operations:
+  - list_organization
+  - list_teams
+  - list_scenarios
+  - read_scenario_metadata
+  - read_scenario_blueprints
+  - read_connections_metadata
+  - read_webhook_and_schedule_metadata
+
+forbidden_operations:
+  - run_scenario
+  - start_scenario
+  - stop_scenario
+  - update_scenario
+  - stop_execution
+  - connection_write
+  - webhook_write
+  - provider_write
+  - prod_change
+  - external_financial_write
+
+runtime_guard:
+  required_worker: sis.worker.integration
+  binding_contract: sis_agent_runtime_v1
+  binding_status: active
+  environment_must_match_resource: true
+  dispatcher_rpc: sis_gpt_action_dispatch_v1
+  resource_list_rpc: sis_gpt_action_list_v1
+  audit_table: public.sis_gpt_action_invocations
+
+credential_policy:
+  vault_secret_name: make_eu1_api_token
+  secret_must_not_be_returned: true
+  access_token_persisted: false
+  refresh_token_persisted: false
+  fail_closed_if_missing: MAKE_TOKEN_MISSING
+
+inventory_safety:
+  make_http_method: GET
+  scenario_scope:
+    dev_name_markers:
+      - DEV
+      - TEST
+      - SIS DEV
+      - SIS TEST
+    production_scenarios_excluded: true
+  blueprint_sanitization: true
+  connection_secret_values_returned: false
+  webhook_secret_values_returned: false
+
+regression_expectations:
+  authorized_dev_subject_reaches_dev_resource: true
+  authorized_test_subject_reaches_test_resource: true
+  cross_environment_subject_denied: true
+  non_allowlisted_operation_denied: true
+  missing_provider_credential_fails_closed: true
+  audit_on_provider_failure: true
+
+promotion:
+  dev_test_authorized_by: user_explicit
+  prod_promotion: not_approved
+  prod_requires_separate_explicit_approval: true
