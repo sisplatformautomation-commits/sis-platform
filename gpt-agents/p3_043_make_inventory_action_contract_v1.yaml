@@ -2,9 +2,7 @@ version: 1.0.0
 work_item: P3-043
 contract: sis_make_inventory_read_v1
 provider: make
-environments:
-  - dev
-  - test
+environments: [dev, test]
 production_enabled: false
 
 principles:
@@ -16,7 +14,6 @@ principles:
   runtime_identity_from_auth_subject: true
   integration_worker_only: true
   cross_environment_access: false
-  direct_registry_table_access: false
   model_secret_visibility: never
 
 resources:
@@ -48,42 +45,65 @@ forbidden_operations:
   - prod_change
   - external_financial_write
 
-runtime_guard:
+execution_plane:
+  source_project_ref: ohoqdlufghlhmceokgpv
   required_worker: sis.worker.integration
   binding_contract: sis_agent_runtime_v1
   binding_status: active
-  environment_must_match_resource: true
-  dispatcher_rpc: sis_gpt_action_dispatch_v1
+  authorize_rpc: sis_gpt_action_authorize_v1
   resource_list_rpc: sis_gpt_action_list_v1
-  audit_table: public.sis_gpt_action_invocations
+  dev_gateway_verify_jwt: true
+  test_gateway_verify_jwt: true
+
+provider_broker:
+  control_plane_project_ref: uwgkwyxjuikqxsezkezj
+  edge_gateway: sis-make-inventory-broker
+  cross_project_auth: verify_source_jwt_via_source_auth_user_endpoint
+  subject_allowlist_table: public.sis_make_runtime_subject_allowlist
+  provider_rpc: public.sis_make_inventory_broker_v1
+  audit_table: public.sis_make_inventory_broker_audit
+  make_http_method: GET
 
 credential_policy:
+  vault_location: control_plane_only
   vault_secret_name: make_eu1_api_token
+  copied_to_execution_plane: false
   secret_must_not_be_returned: true
   access_token_persisted: false
   refresh_token_persisted: false
-  fail_closed_if_missing: MAKE_TOKEN_MISSING
+  model_secret_visibility: never
 
 inventory_safety:
-  make_http_method: GET
   scenario_scope:
-    dev_name_markers:
-      - DEV
-      - TEST
-      - SIS DEV
-      - SIS TEST
+    dev_markers:
+      - "DEV |"
+      - "| DEV |"
+    test_markers:
+      - "TEST |"
+      - "| TEST |"
     production_scenarios_excluded: true
-  blueprint_sanitization: true
+    temp_test_word_substrings_excluded: true
+  blueprint_raw_content_returned: false
+  blueprint_returns_hash_and_module_count_only: true
   connection_secret_values_returned: false
-  webhook_secret_values_returned: false
+  webhook_urls_returned: false
 
-regression_expectations:
-  authorized_dev_subject_reaches_dev_resource: true
-  authorized_test_subject_reaches_test_resource: true
-  cross_environment_subject_denied: true
-  non_allowlisted_operation_denied: true
-  missing_provider_credential_fails_closed: true
-  audit_on_provider_failure: true
+regression:
+  end_to_end_dev_jwt_broker_make_get: passed
+  end_to_end_test_jwt_broker_make_get: passed
+  dev_scenario_count: 13
+  test_scenario_count: 1
+  prod_scenario_leak_count: 0
+  temp_testbeleg_leak_count: 0
+  list_organization: passed
+  list_teams: passed
+  read_connections_metadata: passed
+  read_webhook_and_schedule_metadata: passed
+  read_scenario_metadata: passed
+  read_scenario_blueprints: passed
+  cross_environment_subject_denied: passed
+  non_allowlisted_operation_denied: passed
+  provider_write_performed: false
 
 promotion:
   dev_test_authorized_by: user_explicit
