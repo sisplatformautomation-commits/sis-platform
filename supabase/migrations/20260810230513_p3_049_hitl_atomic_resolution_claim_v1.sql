@@ -5,7 +5,14 @@ alter table public.sis_agent_hitl_runs
   add column if not exists resolution_claim_decision text,
   add column if not exists resolution_claimed_at timestamptz,
   add column if not exists resolution_claimed_by text,
-  add column if not exists resolution_claim_completed_at timestamptz;
+  add column if not exists resolution_claim_completed_at timestamptz,
+  add column if not exists action_fingerprint text;
+
+alter table public.sis_agent_hitl_runs
+  drop constraint if exists sis_agent_hitl_runs_action_fingerprint_check;
+alter table public.sis_agent_hitl_runs
+  add constraint sis_agent_hitl_runs_action_fingerprint_check
+  check (action_fingerprint is null or action_fingerprint ~ '^[0-9a-f]{64}$');
 
 alter table public.sis_agent_hitl_runs
   drop constraint if exists sis_agent_hitl_runs_resolution_claim_decision_check;
