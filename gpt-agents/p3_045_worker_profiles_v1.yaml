@@ -1,0 +1,140 @@
+version: 1.0.0
+work_item: P3-045
+architecture: supervisor_worker
+source_of_truth: supabase
+
+principles:
+  supervisor_executes_provider_actions: false
+  self_review_allowed: false
+  arbitrary_provider_ids_allowed: false
+  resource_keys_required_for_provider_actions: true
+  direct_agent_table_access: false
+  approval_ingestion_inside_worker_pool: false
+
+profiles:
+  sis.supervisor:
+    role: supervisor
+    capabilities:
+      - orchestration.plan
+      - orchestration.delegate
+    allowed_rpcs:
+      - sis_agent_worker_list_v1
+      - sis_agent_supervisor_queue_job_v1
+      - sis_agent_supervisor_release_approved_job_v1
+      - sis_agent_supervisor_requeue_ready_v1
+      - sis_agent_supervisor_recover_expired_leases_v1
+      - sis_agent_supervisor_job_status_v1
+      - sis_agent_supervisor_work_item_gate_v1
+    denied_classes:
+      - database_execution
+      - provider_execution
+      - repository_execution
+      - runtime_execution
+      - finance_execution
+
+  sis.worker.database:
+    role: worker
+    capabilities:
+      - database.read
+      - database.migration
+    allowed_rpcs:
+      - sis_agent_worker_claim_v1
+      - sis_agent_worker_heartbeat_v1
+      - sis_agent_worker_submit_v1
+      - sis_agent_worker_fail_v1
+
+  sis.worker.integration:
+    role: worker
+    capabilities:
+      - integration.provider_read
+      - integration.provider_write
+    resource_guard: P3-043
+    allowed_rpcs:
+      - sis_agent_worker_claim_v1
+      - sis_agent_worker_heartbeat_v1
+      - sis_agent_worker_submit_v1
+      - sis_agent_worker_fail_v1
+
+  sis.worker.repository:
+    role: worker
+    capabilities:
+      - repository.branch_write
+      - repository.pr_write
+      - repository.merge
+    allowed_rpcs:
+      - sis_agent_worker_claim_v1
+      - sis_agent_worker_heartbeat_v1
+      - sis_agent_worker_submit_v1
+      - sis_agent_worker_fail_v1
+
+  sis.worker.documentation:
+    role: worker
+    capabilities:
+      - documentation.write
+    allowed_rpcs:
+      - sis_agent_worker_claim_v1
+      - sis_agent_worker_heartbeat_v1
+      - sis_agent_worker_submit_v1
+      - sis_agent_worker_fail_v1
+
+  sis.worker.runtime:
+    role: worker
+    capabilities:
+      - runtime.read
+      - runtime.change
+    allowed_rpcs:
+      - sis_agent_worker_claim_v1
+      - sis_agent_worker_heartbeat_v1
+      - sis_agent_worker_submit_v1
+      - sis_agent_worker_fail_v1
+
+  sis.worker.finance:
+    role: worker
+    capabilities:
+      - finance.read
+    explicitly_not_granted:
+      - finance.external_write
+    allowed_rpcs:
+      - sis_agent_worker_claim_v1
+      - sis_agent_worker_heartbeat_v1
+      - sis_agent_worker_submit_v1
+      - sis_agent_worker_fail_v1
+
+  sis.reviewer.qa_security:
+    role: reviewer
+    capabilities:
+      - review.qa
+      - review.security
+    allowed_rpcs:
+      - sis_agent_reviewer_submit_v1
+
+runtime_binding:
+  model_secret_visibility: never
+  worker_identity_binding: action_contract
+  generic_service_role_rpc_exposure_to_model: false
+  note: >-
+    Each deployed GPT/agent must receive a role-specific tool surface. The model must not receive
+    a generic raw Supabase service-role client. Worker identity is fixed by the guarded action/tool
+    configuration; worker_key is not intended as a free user-controlled runtime field.
+
+approval_policy:
+  external_source_required: true
+  worker_can_create_approval: false
+  supervisor_can_create_approval: false
+  scopes:
+    - execute
+    - prod_promotion
+    - provider_write
+    - external_financial_write
+    - destructive_change
+
+review_policy:
+  default: qa_security
+  decisions:
+    pass: succeeded
+    changes_required: retry_wait
+    fail: failed
+
+prod_promotion:
+  status: not_approved
+  requirement: separate_explicit_user_approval_for_exact_test_verified_commit
