@@ -1,29 +1,29 @@
 # SIS Empty-Project Bootstrap: Email Assistant
 
-Status: DEV/TEST recovery path validated on 2026-08-10. No PROD mutation was performed.
+Status: DEV/TEST recovery path validated on 2026-08-10. The marker-gated normalization and profile/alias privilege lockdown were later promoted to production with the Runtime Foundation after explicit approval. The prerequisite seed remains a non-PROD bootstrap procedure and is not production data.
 
 ## Problem
 
-The historical production migration `20260810004840 email_assistant_profiles` is not data-independent. Its consolidation block requires existing `GMBH_MAIL_ASSISTANT` and `PERSONAL_MAIL_ASSISTANT` Business Case rows and raises an exception when either row is absent.
+The historical migration `20260810004840 email_assistant_profiles` is data-dependent. Its consolidation block requires existing `GMBH_MAIL_ASSISTANT` and `PERSONAL_MAIL_ASSISTANT` Business Case rows and raises an exception when either row is absent.
 
-A Supabase preview branch created with `with_data=false` contains the schema/migration history but not those production control-plane rows. Native replay can therefore stop at `email_assistant_profiles` even though the preview database itself remains healthy.
+A Supabase preview branch created with `with_data=false` does not carry those production control-plane rows. Native replay can therefore stop at `email_assistant_profiles` even though the preview database itself remains healthy.
 
-## Supported DEV/TEST recovery path
+## Supported non-PROD recovery path
 
 1. Confirm the target is a disposable/non-PROD data-less environment and that the preview database is healthy enough to accept SQL.
-2. Confirm the base SIS tables `public.sis_programs` and `public.sis_business_cases` exist and that `email_assistant_profiles` has not completed.
+2. Confirm `public.sis_programs` and `public.sis_business_cases` exist and that `email_assistant_profiles` has not completed.
 3. Run `supabase/bootstrap/email_assistant_empty_project_prerequisites.sql`.
 4. Rebase/retry the Supabase branch migration replay.
 5. Confirm `email_assistant_profiles` completed and the legacy aliases resolve to `EMAIL_ASSISTANT` profiles `gmbh` and `personal`.
-6. Apply `20260810105500_email_assistant_empty_project_normalize.sql` so a synthetic empty-project bootstrap is represented truthfully as blocked/progress 0 rather than inheriting production-derived active/progress 70 state from the historical migration.
-7. Apply `20260810111500_email_assistant_profile_table_lockdown.sql` so direct `service_role` access to the profile/alias tables is SELECT-only.
+6. Apply `supabase/migrations/20260810104330_email_assistant_empty_project_normalize.sql` so a synthetic empty-project bootstrap is represented truthfully as blocked/progress 0 instead of inheriting production-derived active/progress 70 state.
+7. Apply `supabase/migrations/20260810104458_email_assistant_profile_table_lockdown.sql` so direct `service_role` access to profile/alias tables is SELECT-only.
 8. Run `supabase/tests/email_assistant_empty_project_contract.sql`, then Supabase Security and Performance Advisors.
 
 ## Bootstrap seed safety
 
 The prerequisite seed is deliberately narrow:
 
-- It creates only synthetic SIS control-plane prerequisite rows needed by the historical migration.
+- It creates only synthetic SIS control-plane prerequisite rows required by the historical migration.
 - It does not copy production/customer rows.
 - It does not configure mailboxes, connections, deployments, credentials, tokens, secrets or runtime resources.
 - Seeded Business Cases are `blocked`, priority `normal`, progress `0` with `mail_write_allowed=false`, `external_writes_enabled=false` and `prod_changes=false`.
@@ -45,28 +45,36 @@ For a marker-gated empty project, the resulting state is:
 
 ## TEST evidence — 2026-08-10
 
-The existing preview branch `sis-platform-test` (`with_data=false`) was initially `MIGRATIONS_FAILED` because the two required legacy Business Cases were absent. The prerequisite seed was applied on TEST only, then the branch was rebased. The branch controller reached `FUNCTIONS_DEPLOYED` and the preview database remained `ACTIVE_HEALTHY`.
+The existing preview branch `sis-platform-test` (`with_data=false`) was initially `MIGRATIONS_FAILED` because the two required legacy Business Cases were absent. The prerequisite seed was applied on TEST only and the branch was rebased. The controller reached `FUNCTIONS_DEPLOYED`; the preview database remained `ACTIVE_HEALTHY`.
 
 After replay, normalization and privilege lockdown:
 
-- Migration history contains the historical `email_assistant_profiles` migration and the Runtime Foundation migrations.
-- `EMAIL_ASSISTANT` and both profiles are blocked/progress 0 with synthetic bootstrap markers and all write flags false.
-- Both legacy aliases resolve correctly through `sis_chat_bootstrap_context_v1`.
-- `sis_chat_start_menu_v1` still returns `execution_allowed=false`, `approval_granted=false`, `task_start_allowed=false`.
-- `service_role` has SELECT but no INSERT/UPDATE/DELETE/TRUNCATE on `sis_business_case_profiles` and `sis_business_case_aliases`; `anon` and `authenticated` have no direct access.
+- `EMAIL_ASSISTANT` and both profiles were blocked/progress 0 with synthetic bootstrap markers and all write flags false.
+- Both legacy aliases resolved correctly through `sis_chat_bootstrap_context_v1`.
+- `sis_chat_start_menu_v1` returned `execution_allowed=false`, `approval_granted=false`, `task_start_allowed=false`.
+- `service_role` had SELECT but no INSERT/UPDATE/DELETE/TRUNCATE on `sis_business_case_profiles` and `sis_business_case_aliases`; `anon` and `authenticated` had no direct access.
 - `email_assistant_empty_project_contract.sql` passed.
 - Re-running the prerequisite seed after consolidation was a no-op and did not recreate `GMBH_MAIL_ASSISTANT`.
-- Runtime Foundation write-approval and gateway security contract tests were rerun after the successful current-main rebase and both passed; all synthetic Runtime test rows rolled back to zero.
-- Security Advisor reports the two Email Assistant tables as `RLS Enabled No Policy` INFO. This is consistent with the deny-by-default direct-access model. No new Email Assistant-specific WARN finding was introduced.
-- Performance Advisor reports no new unindexed foreign-key issue for the Email Assistant profile/alias tables. The alias index is unused on the empty TEST branch, which is expected before workload.
+- Runtime Foundation write-approval and gateway security contract tests were rerun after the successful rebase and both passed; all synthetic Runtime rows rolled back to zero.
+
+## Production promotion evidence — 2026-08-10
+
+The two forward migrations were promoted to production with the Runtime Foundation:
+
+- `20260810104330 email_assistant_empty_project_normalize`
+- `20260810104458 email_assistant_profile_table_lockdown`
+
+Production verification showed:
+
+- The real `EMAIL_ASSISTANT` remained `active / high / 70` with no `bootstrap_empty_project_seed_v1` or `bootstrap_normalized_v1` marker, so normalization was a no-op for real historical state.
+- `service_role` became SELECT-only on `sis_business_case_profiles` and `sis_business_case_aliases`.
+- The non-PROD prerequisite seed itself was not applied to production.
 
 ## Historical-lineage limitation
 
-This recovery path fixes the operational empty-project blocker without changing PROD. It does not rewrite the already-recorded production migration history.
+The operational recovery path is solved, but the historical migration lineage was not rewritten. A brand-new native `with_data=false` branch replaying the same history from scratch can still stop at `email_assistant_profiles` before later forward migrations are reached.
 
-Therefore, a brand-new native `with_data=false` branch replaying the same historical lineage from scratch can still stop at `email_assistant_profiles` before later migrations are reached. The supported no-PROD procedure is to inject the explicit prerequisite seed into the failed/paused non-PROD preview database and retry/rebase.
-
-Removing that recovery step entirely would require a separate platform decision and explicit PROD authorization for a migration-lineage/baseline strategy, such as a supported baseline/squash or another mechanism that makes fresh installs independent of historical production rows. No such PROD change was made here.
+The supported procedure remains: inject the explicit prerequisite seed into the failed/paused non-PROD preview database, then retry/rebase and continue with the forward migrations. Eliminating this recovery step entirely would require a separate baseline/squash or migration-lineage strategy.
 
 ## Advisor references
 
