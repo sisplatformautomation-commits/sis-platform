@@ -1,0 +1,50 @@
+openapi: 3.1.0
+info:
+  title: SIS GPT Action Resource Gateway
+  version: 1.0.0
+  description: Resource-key based GPT action contract for guarded provider operations.
+paths:
+  /rpc/sis_gpt_action_list_v1:
+    post:
+      operationId: sis_gpt_action_list_v1
+      summary: List active GPT action resources for an environment/customer scope.
+      x-sis-mode: read_only
+  /rpc/sis_make_gpt_action_run_v1:
+    post:
+      operationId: sis_make_gpt_action_run_v1
+      summary: Run one registered guarded Make resource by resource_key.
+      description: The GPT never supplies a scenario ID or connection ID. Supabase resolves and validates both server-side.
+      x-sis-mode: guarded_nonprod_execution
+      x-sis-requires-explicit-task-and-verb: true
+  /rpc/sis_make_gpt_action_execution_status_v1:
+    post:
+      operationId: sis_make_gpt_action_execution_status_v1
+      summary: Read execution status for a previously submitted registered Make resource.
+      x-sis-mode: read_only
+x-sis-contract:
+  resource_key_only: true
+  arbitrary_scenario_id_forbidden: true
+  arbitrary_connection_id_forbidden: true
+  direct_registry_table_access_forbidden: true
+  provider_writes_default: false
+  external_financial_writes_default: false
+  prod_default: false
+  server_side_guards_required:
+    - customer_scope
+    - environment_scope
+    - resource_status
+    - allowed_operation
+    - scenario_identity
+    - blueprint_shape
+    - connection_identity
+    - provider_method_allowlist
+    - invocation_audit
+x-sis-initial-resource:
+  resource_key: make.lexhub.qonto_read.dev.sis_internal_hospitality
+  provider: make
+  environment: dev
+  customer_key: sis_internal_hospitality
+  scenario_id_server_side: 6871294
+  connection_id_server_side: 9597442
+  qonto_operations: GET-only
+  external_financial_writes: false
