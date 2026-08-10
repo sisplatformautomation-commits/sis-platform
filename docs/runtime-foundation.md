@@ -1,8 +1,6 @@
 # SIS Runtime Foundation
 
-Status: Runtime-specific DEV/TEST validation completed on the existing Supabase preview branch `sis-platform-test`. No runtime migration from this feature branch has been applied to PROD, and no real customer runtime resource was created or changed.
-
-A separate platform-level empty-project replay blocker remains: the current main migration `email_assistant_profiles` is data-dependent and fails on a data-less preview branch when its expected legacy Business Case rows are absent. This blocker is not caused by the Runtime Foundation migrations and is documented below.
+Status: Runtime-specific DEV/TEST validation completed on the existing Supabase preview branch `sis-platform-test`. The separate `email_assistant_profiles` empty-project replay blocker was also resolved operationally for DEV/TEST through an explicit synthetic control-plane prerequisite plus marker-gated normalization. The TEST branch is now `FUNCTIONS_DEPLOYED` with an `ACTIVE_HEALTHY` preview database. No migration from this feature branch has been applied to PROD, and no real customer runtime or mailbox resource was created or changed.
 
 ## Purpose
 
@@ -16,6 +14,11 @@ The repository currently contains:
 - `20260810100000_runtime_fk_covering_indexes.sql`: covering indexes for the composite runtime foreign keys reported by the Supabase performance advisor.
 - `supabase/tests/runtime_write_approval_contract.sql`: single-use approval contract test using synthetic rows inside a rollback transaction.
 - `supabase/tests/runtime_gateway_security_contract.sql`: least-privilege gateway contract test under `service_role`, also fully rolled back.
+- `supabase/bootstrap/email_assistant_empty_project_prerequisites.sql`: synthetic control-plane prerequisites for the historical data-dependent Email Assistant migration on data-less DEV/TEST environments.
+- `20260810105500_email_assistant_empty_project_normalize.sql`: marker-gated normalization that keeps synthetic empty-project Email Assistant state blocked/progress 0.
+- `20260810111500_email_assistant_profile_table_lockdown.sql`: makes direct `service_role` access to Email Assistant profile/alias tables SELECT-only.
+- `supabase/tests/email_assistant_empty_project_contract.sql`: read-only contract for aliases, state truth, start-menu safety, RLS and table privileges.
+- `docs/empty-project-bootstrap.md`: supported DEV/TEST recovery procedure and historical-lineage limitation.
 
 ## Safety invariants
 
@@ -28,6 +31,7 @@ The repository currently contains:
 7. No passwords, access tokens, API secrets, bank credentials, or full customer documents belong in runtime metadata or audit payloads.
 8. External customer rollout targets dedicated Make organization and dedicated Supabase project per customer/environment. Existing shared/internal states must be represented honestly as legacy/shared until migrated.
 9. PROD mutations, external writes and real customer provisioning always remain behind explicit approval gates.
+10. Empty-project bootstrap rows are synthetic control-plane prerequisites only, carry explicit markers, remain blocked, and never imply a verified mailbox, connection or external-write authorization.
 
 ## Write authorization sequence
 
@@ -44,7 +48,7 @@ The repository currently contains:
 
 The connected production/main Supabase project was inspected read-only first. The runtime environment, session and write-approval tables were not present there, so the feature remained unapplied to PROD.
 
-An already existing data-less preview branch, `sis-platform-test`, was used instead of creating another billable branch. Before applying the runtime feature, the branch contained the required Runtime Foundation base objects (`sis_customers`, `sis_deployments`, `sis_events`) and was brought forward through the SIS chat bootstrap/start-menu migration level used by the runtime migration. The following runtime-specific validation completed successfully on TEST only:
+An already existing data-less preview branch, `sis-platform-test`, was used instead of creating another branch. Runtime-specific validation on TEST completed successfully:
 
 1. Applied the base runtime migration, single-use consume migration, service-role lockdown migration and runtime FK index migration.
 2. Ran `runtime_write_approval_contract.sql`: first consume succeeded, second consume failed, consumed state was persisted inside the transaction, and the consume audit event existed; the transaction rolled back.
@@ -58,29 +62,40 @@ An already existing data-less preview branch, `sis-platform-test`, was used inst
 10. Security Advisor reports `RLS Enabled No Policy` as INFO for the runtime tables. This is intentional deny-by-default because direct grants are removed except `service_role` SELECT; runtime mutations must pass through the SECURITY DEFINER RPCs. No runtime RPC was reported by the advisor as anonymously or authenticated-user executable.
 11. Existing advisor WARN findings for unrelated pre-existing functions remain outside this feature scope, including mutable `search_path` and older SECURITY DEFINER functions executable by `anon`/`authenticated`.
 12. After both contract tests, zero synthetic runtime test customers, runtime environments, sessions and approvals remained.
+13. After the Email Assistant empty-project recovery and successful current-main rebase, both runtime contract tests were rerun and passed again, with all synthetic rows rolled back to zero.
 
-## Current-main empty-project replay blocker — 2026-08-10
+## Email Assistant empty-project recovery evidence — 2026-08-10
 
-After the runtime contracts passed, the branch was checked against the then-current main migration history. Main had advanced with `20260810004840 email_assistant_profiles`, while the data-less preview branch did not contain that migration. Rebase was attempted twice and the Supabase branch controller ended in `MIGRATIONS_FAILED`; the preview database itself remained `ACTIVE_HEALTHY`.
+The authoritative main migration `20260810004840 email_assistant_profiles` explicitly requires Business Cases `GMBH_MAIL_ASSISTANT` and `PERSONAL_MAIL_ASSISTANT`. A `with_data=false` branch does not contain those production rows, which caused the existing TEST branch controller to report `MIGRATIONS_FAILED`.
 
-Read-only inspection of the authoritative main migration record showed that `email_assistant_profiles` explicitly requires existing Business Cases with keys `GMBH_MAIL_ASSISTANT` and `PERSONAL_MAIL_ASSISTANT` and raises an exception if either is absent. The data-less TEST branch contains neither key. Therefore the current-main replay failure is reproducible from the migration contract itself and is not a Runtime Foundation schema or test failure.
+The blocker was addressed without changing PROD:
 
-This distinction matters:
+1. Added and executed on TEST only `supabase/bootstrap/email_assistant_empty_project_prerequisites.sql`. It creates only the two synthetic legacy control-plane prerequisites (and the SIS program if absent), all blocked/progress 0 with write flags false and explicit bootstrap markers.
+2. Retried/rebased `sis-platform-test`. The historical `email_assistant_profiles` migration completed, the controller reached `FUNCTIONS_DEPLOYED`, and the preview database remained `ACTIVE_HEALTHY`.
+3. The historical migration contains production-derived `EMAIL_ASSISTANT` active/progress 70 state. Added and applied the marker-gated `email_assistant_empty_project_normalize` migration so only synthetic bootstrap-derived state is corrected to blocked/normal/progress 0. Real historical rows without the marker are a no-op.
+4. Verified both legacy aliases resolve to the consolidated `EMAIL_ASSISTANT` profiles `gmbh` and `personal`, while start-menu execution/approval/task-start flags remain false.
+5. Found the same Supabase default-ACL pattern on `sis_business_case_profiles` and `sis_business_case_aliases`: `service_role` retained direct DML despite the historical migration granting SELECT. Added/applied the profile table lockdown migration and verified SELECT-only direct access for `service_role`; `anon`/`authenticated` have no direct access.
+6. Ran `email_assistant_empty_project_contract.sql`; all assertions passed.
+7. Re-ran the prerequisite seed after consolidation; it was a no-op and did not recreate `GMBH_MAIL_ASSISTANT`.
+8. Re-ran Security and Performance Advisors after DDL. The profile/alias tables have `RLS Enabled No Policy` INFO, consistent with deny-by-default direct access. No new Email Assistant-specific WARN was introduced and no new unindexed-FK issue exists for these tables. The alias index is unused on the empty TEST branch, which is expected before workload.
 
-- Runtime Foundation migrations and contracts are validated on the isolated TEST database against their required base schema.
-- A complete replay of every current main migration into a data-less branch is not currently valid because of the pre-existing data-dependent `email_assistant_profiles` migration.
-- Creating another data-less branch would exercise the same migration prerequisite and does not remove this blocker by itself.
-- The blocker must be resolved at platform migration/bootstrap design level (for example by defining a supported seed/bootstrap prerequisite or making the consolidation migration empty-project-safe) before a full empty-project acceptance can be claimed.
-- No synthetic legacy Business Cases were inserted merely to force the rebase green; the failure is kept visible as evidence.
+The detailed supported procedure is in `docs/empty-project-bootstrap.md`.
+
+## Historical-lineage limitation
+
+The operational DEV/TEST blocker is resolved, but the production migration lineage itself was intentionally not rewritten. Because `email_assistant_profiles` is already recorded historically in PROD before any new forward migration, a brand-new native `with_data=false` branch can still stop at that historical migration before later fixes are reached.
+
+Under the current no-PROD boundary, the supported path is therefore: seed the explicit synthetic prerequisite into the non-PROD preview database after the replay stops, then retry/rebase and apply the marker-gated forward fixes. Removing this recovery step entirely requires a separate explicit decision and PROD authorization for a baseline/squash or other migration-lineage strategy. No such PROD change was made.
 
 Relevant Supabase advisor references:
 
 - RLS without policy: https://supabase.com/docs/guides/database/database-linter?lint=0008_rls_enabled_no_policy
 - Unindexed foreign keys: https://supabase.com/docs/guides/database/database-linter?lint=0001_unindexed_foreign_keys
+- Unused indexes: https://supabase.com/docs/guides/database/database-linter?lint=0005_unused_index
 - Mutable function search path: https://supabase.com/docs/guides/database/database-linter?lint=0011_function_search_path_mutable
 - Anonymous SECURITY DEFINER execution: https://supabase.com/docs/guides/database/database-linter?lint=0028_anon_security_definer_function_executable
 - Authenticated SECURITY DEFINER execution: https://supabase.com/docs/guides/database/database-linter?lint=0029_authenticated_security_definer_function_executable
 
 ## Remaining boundary
 
-This migration set models and guards runtime access; it does not provision Make organizations, Supabase customer projects, secrets, customer data, or external operations. Runtime-specific TEST validation does not authorize a merge to main or application to PROD. Promotion remains a separate explicit decision. Full current-main empty-project validation additionally remains blocked by the data-dependent `email_assistant_profiles` migration described above.
+This migration set models and guards runtime access and the non-PROD empty-project recovery path; it does not provision Make organizations, Supabase customer projects, mailboxes, secrets, customer data, or external operations. TEST validation does not authorize a merge to main or application to PROD. Promotion and any change to production migration lineage remain separate explicit decisions.
