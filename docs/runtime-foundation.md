@@ -1,37 +1,39 @@
 # SIS Runtime Foundation
 
-Status: Runtime-specific DEV/TEST validation completed on the existing Supabase preview branch `sis-platform-test`. The separate `email_assistant_profiles` empty-project replay blocker was also resolved operationally for DEV/TEST through an explicit synthetic control-plane prerequisite plus marker-gated normalization. The TEST branch is now `FUNCTIONS_DEPLOYED` with an `ACTIVE_HEALTHY` preview database. No migration from this feature branch has been applied to PROD, and no real customer runtime or mailbox resource was created or changed.
+Status: promoted to GitHub `main` and Supabase production on 2026-08-10 after successful TEST validation and explicit user approval. GitHub PR #5 merged successfully. Supabase production completed the deployment workflow and returned to `FUNCTIONS_DEPLOYED` / `ACTIVE_HEALTHY`.
 
 ## Purpose
 
-The runtime foundation separates the central SIS control plane from customer runtime access. A runtime environment is scoped to one customer and one environment. Runtime access starts in READ/CHECK mode after fresh step-up authentication. WRITE requires a separate short-lived approval whose fingerprint must match the intended action.
+The Runtime Foundation separates the central SIS control plane from customer runtime access. A runtime environment is scoped to one customer and one environment. Runtime access starts in READ/CHECK mode after fresh step-up authentication. WRITE requires a separate, short-lived approval whose fingerprint must match the intended action and which is consumed atomically before the external mutation.
 
-The repository currently contains:
+## Promoted repository contents
 
-- `20260810012500_customer_runtime_foundation.sql`: runtime environments, access sessions, write approvals, gateway RPCs, RLS/grants and start-menu integration.
-- `20260810091000_runtime_write_approval_consume.sql`: atomic single-use consumption for write approvals.
-- `20260810094000_runtime_service_role_table_lockdown.sql`: removes direct runtime table mutation rights from `service_role` and keeps SELECT plus gateway RPC execution.
-- `20260810100000_runtime_fk_covering_indexes.sql`: covering indexes for the composite runtime foreign keys reported by the Supabase performance advisor.
+- `supabase/migrations/20260810071558_customer_runtime_foundation.sql`: runtime environments, access sessions, write approvals, gateway RPCs, RLS/grants and start-menu integration.
+- `supabase/migrations/20260810071613_runtime_write_approval_consume.sql`: atomic single-use consumption for write approvals.
+- `supabase/migrations/20260810072608_runtime_service_role_table_lockdown.sql`: removes direct runtime table mutation rights from `service_role` and keeps SELECT plus gateway RPC execution.
+- `supabase/migrations/20260810100113_runtime_fk_covering_indexes.sql`: covering indexes for the composite runtime foreign keys reported by the Supabase Performance Advisor.
+- `supabase/migrations/20260810104330_email_assistant_empty_project_normalize.sql`: marker-gated normalization for synthetic empty-project Email Assistant state.
+- `supabase/migrations/20260810104458_email_assistant_profile_table_lockdown.sql`: direct `service_role` access to Email Assistant profile/alias tables becomes SELECT-only.
+- `supabase/bootstrap/email_assistant_empty_project_prerequisites.sql`: explicit non-PROD prerequisite seed for the historical data-dependent Email Assistant migration on data-less environments.
 - `supabase/tests/runtime_write_approval_contract.sql`: single-use approval contract test using synthetic rows inside a rollback transaction.
 - `supabase/tests/runtime_gateway_security_contract.sql`: least-privilege gateway contract test under `service_role`, also fully rolled back.
-- `supabase/bootstrap/email_assistant_empty_project_prerequisites.sql`: synthetic control-plane prerequisites for the historical data-dependent Email Assistant migration on data-less DEV/TEST environments.
-- `20260810105500_email_assistant_empty_project_normalize.sql`: marker-gated normalization that keeps synthetic empty-project Email Assistant state blocked/progress 0.
-- `20260810111500_email_assistant_profile_table_lockdown.sql`: makes direct `service_role` access to Email Assistant profile/alias tables SELECT-only.
 - `supabase/tests/email_assistant_empty_project_contract.sql`: read-only contract for aliases, state truth, start-menu safety, RLS and table privileges.
-- `docs/empty-project-bootstrap.md`: supported DEV/TEST recovery procedure and historical-lineage limitation.
+- `docs/empty-project-bootstrap.md`: supported non-PROD empty-project recovery procedure and historical-lineage limitation.
+
+The migration filenames were aligned with the exact versions recorded on the validated `sis-platform-test` branch before promotion so repository history and deployed migration history remain consistent.
 
 ## Safety invariants
 
 1. Customer/environment switches never inherit an existing runtime session; a new session requires fresh step-up authentication.
 2. Runtime sessions authorize only READ/CHECK.
 3. WRITE requires a separately authenticated approval bound to a concrete action fingerprint.
-4. A write approval is single-use: `sis_consume_runtime_write_approval_v1` atomically changes `approved` to `consumed`. A second consume of the same approval fails.
-5. Runtime tables are RLS-enabled. `public`, `anon`, and `authenticated` have no direct access. `service_role` is limited to direct SELECT and must use the SECURITY DEFINER runtime RPCs for mutations.
-6. Runtime RPC execution is granted to `service_role` and revoked from `public`, `anon`, and `authenticated`.
+4. A write approval is single-use: `sis_consume_runtime_write_approval_v1` atomically changes `approved` to `consumed`; replay fails.
+5. Runtime tables are RLS-enabled. `public`, `anon`, and `authenticated` have no direct access. `service_role` has direct SELECT only and must use the SECURITY DEFINER runtime RPCs for mutations.
+6. Runtime RPC execution is granted to `service_role` and revoked from `anon` and `authenticated`.
 7. No passwords, access tokens, API secrets, bank credentials, or full customer documents belong in runtime metadata or audit payloads.
-8. External customer rollout targets dedicated Make organization and dedicated Supabase project per customer/environment. Existing shared/internal states must be represented honestly as legacy/shared until migrated.
-9. PROD mutations, external writes and real customer provisioning always remain behind explicit approval gates.
-10. Empty-project bootstrap rows are synthetic control-plane prerequisites only, carry explicit markers, remain blocked, and never imply a verified mailbox, connection or external-write authorization.
+8. External customer rollout targets dedicated Make organization and dedicated Supabase project per customer/environment. Existing shared/internal states are represented honestly as legacy/shared until migrated.
+9. External mutations remain behind the explicit runtime WRITE approval gate; promotion of the schema does not itself authorize customer or provider writes.
+10. Empty-project bootstrap rows are synthetic control-plane prerequisites only and never imply a verified mailbox, connection or external-write authorization.
 
 ## Write authorization sequence
 
@@ -44,50 +46,49 @@ The repository currently contains:
 7. Perform the external mutation only when the consume result is `consumed=true`.
 8. Never treat `sis_check_runtime_action_v1` alone as the definitive WRITE authorization gate.
 
-## Runtime validation evidence — 2026-08-10
+## TEST validation evidence — 2026-08-10
 
-The connected production/main Supabase project was inspected read-only first. The runtime environment, session and write-approval tables were not present there, so the feature remained unapplied to PROD.
+The existing data-less preview branch `sis-platform-test` was used. It ended at `FUNCTIONS_DEPLOYED` / `ACTIVE_HEALTHY` after the historical Email Assistant blocker was handled through the explicit synthetic prerequisite procedure.
 
-An already existing data-less preview branch, `sis-platform-test`, was used instead of creating another branch. Runtime-specific validation on TEST completed successfully:
+Validation completed successfully:
 
-1. Applied the base runtime migration, single-use consume migration, service-role lockdown migration and runtime FK index migration.
-2. Ran `runtime_write_approval_contract.sql`: first consume succeeded, second consume failed, consumed state was persisted inside the transaction, and the consume audit event existed; the transaction rolled back.
-3. Verified all three runtime tables have RLS enabled.
-4. Found and fixed a Supabase default-ACL issue where `service_role` initially inherited direct INSERT/UPDATE/DELETE/TRUNCATE privileges on newly created runtime tables.
-5. After the lockdown migration, verified `service_role` has direct SELECT but no direct INSERT, UPDATE, DELETE or TRUNCATE on all three runtime tables.
-6. Verified runtime RPC EXECUTE is present for `service_role` and absent for `anon` and `authenticated`.
-7. Ran `runtime_gateway_security_contract.sql` under `service_role`: direct table UPDATE was denied, stale step-up authentication was denied, READ was allowed for a fresh active session, a wrong WRITE fingerprint was denied, the correct approval was consumed once, and replay was denied; the transaction rolled back.
-8. Verified the SIS start menu remains navigation-only: `execution_allowed=false`, `approval_granted=false`, `task_start_allowed=false`, runtime state `locked`, and separate WRITE approval required.
-9. Ran Supabase Security and Performance Advisors after DDL. The two runtime-specific unindexed composite-FK findings disappeared after the covering-index migration. Newly created indexes are reported as unused on the empty TEST branch, which is expected before workload exists.
-10. Security Advisor reports `RLS Enabled No Policy` as INFO for the runtime tables. This is intentional deny-by-default because direct grants are removed except `service_role` SELECT; runtime mutations must pass through the SECURITY DEFINER RPCs. No runtime RPC was reported by the advisor as anonymously or authenticated-user executable.
-11. Existing advisor WARN findings for unrelated pre-existing functions remain outside this feature scope, including mutable `search_path` and older SECURITY DEFINER functions executable by `anon`/`authenticated`.
-12. After both contract tests, zero synthetic runtime test customers, runtime environments, sessions and approvals remained.
-13. After the Email Assistant empty-project recovery and successful current-main rebase, both runtime contract tests were rerun and passed again, with all synthetic rows rolled back to zero.
+- `runtime_write_approval_contract.sql`: first consume succeeded, replay failed, consumed state and audit event were present inside the transaction, then rolled back.
+- `runtime_gateway_security_contract.sql`: direct `service_role` table UPDATE denied; stale step-up denied; fresh READ allowed; wrong fingerprint denied; matching approval consumed once; replay denied; transaction rolled back.
+- `email_assistant_empty_project_contract.sql`: aliases, blocked synthetic state, start-menu safety, RLS and table privileges all passed.
+- After Runtime tests, synthetic customers, runtimes, sessions and approvals were zero.
+- Runtime composite-FK advisor findings disappeared after the covering indexes were added.
+- `service_role` direct DML on Runtime and Email Assistant profile/alias tables was removed after Supabase default ACL behavior was discovered during TEST.
 
-## Email Assistant empty-project recovery evidence — 2026-08-10
+## Production promotion evidence — 2026-08-10
 
-The authoritative main migration `20260810004840 email_assistant_profiles` explicitly requires Business Cases `GMBH_MAIL_ASSISTANT` and `PERSONAL_MAIL_ASSISTANT`. A `with_data=false` branch does not contain those production rows, which caused the existing TEST branch controller to report `MIGRATIONS_FAILED`.
+Before promotion, production had none of the six feature migrations and no Runtime tables/RPC. After explicit approval, GitHub PR #5 was merged to `main`, then the validated Supabase branch was merged to production.
 
-The blocker was addressed without changing PROD:
+Production verification after deployment:
 
-1. Added and executed on TEST only `supabase/bootstrap/email_assistant_empty_project_prerequisites.sql`. It creates only the two synthetic legacy control-plane prerequisites (and the SIS program if absent), all blocked/progress 0 with write flags false and explicit bootstrap markers.
-2. Retried/rebased `sis-platform-test`. The historical `email_assistant_profiles` migration completed, the controller reached `FUNCTIONS_DEPLOYED`, and the preview database remained `ACTIVE_HEALTHY`.
-3. The historical migration contains production-derived `EMAIL_ASSISTANT` active/progress 70 state. Added and applied the marker-gated `email_assistant_empty_project_normalize` migration so only synthetic bootstrap-derived state is corrected to blocked/normal/progress 0. Real historical rows without the marker are a no-op.
-4. Verified both legacy aliases resolve to the consolidated `EMAIL_ASSISTANT` profiles `gmbh` and `personal`, while start-menu execution/approval/task-start flags remain false.
-5. Found the same Supabase default-ACL pattern on `sis_business_case_profiles` and `sis_business_case_aliases`: `service_role` retained direct DML despite the historical migration granting SELECT. Added/applied the profile table lockdown migration and verified SELECT-only direct access for `service_role`; `anon`/`authenticated` have no direct access.
-6. Ran `email_assistant_empty_project_contract.sql`; all assertions passed.
-7. Re-ran the prerequisite seed after consolidation; it was a no-op and did not recreate `GMBH_MAIL_ASSISTANT`.
-8. Re-ran Security and Performance Advisors after DDL. The profile/alias tables have `RLS Enabled No Policy` INFO, consistent with deny-by-default direct access. No new Email Assistant-specific WARN was introduced and no new unindexed-FK issue exists for these tables. The alias index is unused on the empty TEST branch, which is expected before workload.
+- Production branch status: `FUNCTIONS_DEPLOYED`; project database: `ACTIVE_HEALTHY`.
+- Migration history contains exactly:
+  - `20260810071558 customer_runtime_foundation`
+  - `20260810071613 runtime_write_approval_consume`
+  - `20260810072608 runtime_service_role_table_lockdown`
+  - `20260810100113 runtime_fk_covering_indexes`
+  - `20260810104330 email_assistant_empty_project_normalize`
+  - `20260810104458 email_assistant_profile_table_lockdown`
+- `sis_runtime_environments`, `sis_runtime_access_sessions` and `sis_runtime_write_approvals` exist.
+- `sis_consume_runtime_write_approval_v1(uuid,uuid,text,text)` exists.
+- `service_role` has SELECT but no INSERT/UPDATE/DELETE/TRUNCATE on all three Runtime tables.
+- Runtime open/consume RPCs are executable by `service_role` and not by `anon` or `authenticated`.
+- SIS start menu remains navigation-only: `execution_allowed=false`, `approval_granted=false`, `task_start_allowed=false`.
+- The existing real `EMAIL_ASSISTANT` remained unchanged at `active / high / 70`; it received no synthetic bootstrap or normalization marker, proving the marker-gated normalization was a PROD no-op for real historical state.
+- `service_role` is SELECT-only on `sis_business_case_profiles` and `sis_business_case_aliases` after the promoted lockdown.
+- The existing internal hospitality PROD runtime was registered only as metadata with `ownership_model=legacy_shared`, `make_isolation_mode=shared`, `database_isolation_mode=shared`; no external resource was provisioned by the migration.
 
-The detailed supported procedure is in `docs/empty-project-bootstrap.md`.
+## Advisors after production DDL
 
-## Historical-lineage limitation
+Security Advisor reports `RLS Enabled No Policy` as INFO for Runtime and Email Assistant profile/alias tables. This is intentional for the deny-by-default direct-access model. No Runtime RPC was reported as anonymously or authenticated-user executable. Existing unrelated legacy WARN findings remain, including mutable `search_path` and older SECURITY DEFINER functions exposed to `anon`/`authenticated`.
 
-The operational DEV/TEST blocker is resolved, but the production migration lineage itself was intentionally not rewritten. Because `email_assistant_profiles` is already recorded historically in PROD before any new forward migration, a brand-new native `with_data=false` branch can still stop at that historical migration before later fixes are reached.
+Performance Advisor reports no Runtime composite-FK finding after promotion. Runtime indexes can appear as unused until production workload exercises them. Existing unrelated legacy performance findings remain outside this promotion.
 
-Under the current no-PROD boundary, the supported path is therefore: seed the explicit synthetic prerequisite into the non-PROD preview database after the replay stops, then retry/rebase and apply the marker-gated forward fixes. Removing this recovery step entirely requires a separate explicit decision and PROD authorization for a baseline/squash or other migration-lineage strategy. No such PROD change was made.
-
-Relevant Supabase advisor references:
+Advisor references:
 
 - RLS without policy: https://supabase.com/docs/guides/database/database-linter?lint=0008_rls_enabled_no_policy
 - Unindexed foreign keys: https://supabase.com/docs/guides/database/database-linter?lint=0001_unindexed_foreign_keys
@@ -98,4 +99,4 @@ Relevant Supabase advisor references:
 
 ## Remaining boundary
 
-This migration set models and guards runtime access and the non-PROD empty-project recovery path; it does not provision Make organizations, Supabase customer projects, mailboxes, secrets, customer data, or external operations. TEST validation does not authorize a merge to main or application to PROD. Promotion and any change to production migration lineage remain separate explicit decisions.
+The Runtime Foundation is now promoted, but it does not provision new Make organizations, new Supabase customer projects, mailboxes, secrets, customer documents or provider writes. Real customer provisioning and external mutations still require their own explicit runtime approvals and execution steps.
