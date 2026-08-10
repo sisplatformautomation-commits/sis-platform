@@ -1,3 +1,5 @@
+create extension if not exists pg_cron;
+
 select cron.schedule(
   'sis-agent-hitl-expiry-sweeper-test',
   '*/5 * * * *',
