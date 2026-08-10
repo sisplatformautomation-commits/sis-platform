@@ -24,6 +24,7 @@ const CAPABILITY = "integration.provider_write";
 const RESOURCE_KEY = "make.gmail_trash.test.sis_internal_hospitality";
 const ACTION_KEY = "gmail.trash";
 const TOOL_NAME = "gma_gmail_trash_shadow_action";
+const APPROVAL_LEASE_SECONDS = 3600;
 
 function projectKey(jsonName: string, legacyName: string): string | null {
   const value = Deno.env.get(jsonName);
@@ -224,6 +225,16 @@ function modelHasToolResult(input: unknown) {
   return serialized.includes("function_call_result") || serialized.includes("function_call_output") || serialized.includes("EVIDENCE_ONLY_EXECUTED_NO_PROVIDER_WRITE") || serialized.includes("P3-049 TEST rejection") || serialized.includes("Tool execution was not approved");
 }
 
+async function actionFingerprint(hitlId: string) {
+  return sha256(JSON.stringify({
+    v: 1,
+    hitl_id: hitlId,
+    resource_key: RESOURCE_KEY,
+    action_key: ACTION_KEY,
+    tool_name: TOOL_NAME,
+  }));
+}
+
 function buildAgent(db: SupabaseClient, hitlId: string, authorizationDecision: string) {
   const evidenceTool = tool({
     name: TOOL_NAME,
@@ -241,15 +252,14 @@ function buildAgent(db: SupabaseClient, hitlId: string, authorizationDecision: s
     needsApproval: async () => authorizationDecision === "APPROVAL_REQUIRED",
     execute: async (args: any) => {
       if (args.hitl_id !== hitlId || args.resource_key !== RESOURCE_KEY || args.action !== ACTION_KEY) throw new Error("HITL_TOOL_SCOPE_MISMATCH");
-      const { data, error } = await db.from("sis_agent_hitl_runs")
-        .update({ tool_execution_count: 1, updated_at: new Date().toISOString() })
-        .eq("id", hitlId)
-        .eq("status", "pending_approval")
-        .eq("tool_execution_count", 0)
-        .select("id")
-        .maybeSingle();
-      if (error || !data) throw new Error("HITL_EVIDENCE_TOOL_NOT_IDEMPOTENT");
-      return "EVIDENCE_ONLY_EXECUTED_NO_PROVIDER_WRITE";
+      const fingerprint = await actionFingerprint(hitlId);
+      const { data, error } = await db.rpc("sis_agent_hitl_effect_commit_v1", {
+        p_hitl_id: hitlId,
+        p_action_fingerprint: fingerprint,
+        p_result_code: "EVIDENCE_ONLY_EXECUTED_NO_PROVIDER_WRITE",
+      });
+      if (error || !data?.ok) throw new Error(`HITL_EVIDENCE_EFFECT_COMMIT_FAILED:${error?.message ?? "NO_RESULT"}`);
+      return String(data.result_code ?? "EVIDENCE_ONLY_EXECUTED_NO_PROVIDER_WRITE");
     },
   });
 
@@ -296,7 +306,9 @@ async function startHitl(db: SupabaseClient) {
   const authorization = await p3048Decision(db, hitlId);
   const requestedTraceId = newTraceId();
   const groupId = `P3-049:HITL:GMA-002:${hitlId.slice(0, 8)}`;
-  const now = new Date().toISOString();
+  const nowDate = new Date();
+  const now = nowDate.toISOString();
+  const approvalExpiresAt = new Date(nowDate.getTime() + APPROVAL_LEASE_SECONDS * 1000).toISOString();
 
   const { error: insertError } = await db.from("sis_agent_hitl_runs").insert({
     id: hitlId,
@@ -318,6 +330,7 @@ async function startHitl(db: SupabaseClient) {
       p3_048_reason_codes: authorization.reason_codes ?? [],
       shadow_only_resource: true,
       evidence_only_tool: true,
+      durability_hardening: "p3_050_native_v1",
     },
     created_at: now,
     updated_at: now,
@@ -359,7 +372,10 @@ async function startHitl(db: SupabaseClient) {
       interruption_count: 1,
       tool_name: String(interruption.name ?? TOOL_NAME),
       tool_call_id: toolCallId,
-      updated_at: new Date().toISOString(),
+      approval_expires_at: approvalExpiresAt,
+      approval_last_checked_at: now,
+      approval_recovery_state: "active",
+      updated_at: now,
     }).eq("id", hitlId).eq("status", "created");
     if (error) throw new Error(`HITL_PENDING_PERSIST_FAILED:${error.message}`);
 
@@ -373,6 +389,8 @@ async function startHitl(db: SupabaseClient) {
       trace_id: canonicalTraceId,
       trace_group_id: groupId,
       state_sha256: stateHash,
+      approval_expires_at: approvalExpiresAt,
+      approval_recovery_state: "active",
       tool_execution_count: 0,
       provider_write_performed: false,
       mail_write_performed: false,
@@ -392,6 +410,11 @@ async function resolveHitl(db: SupabaseClient, hitlId: string, decision: "approv
   if (error || !row) throw new Error("HITL_RUN_NOT_FOUND");
   if (row.status !== "pending_approval" || !row.sdk_state || !row.state_sha256) throw new Error("HITL_RUN_NOT_PENDING");
   if (row.authorization_decision !== "APPROVAL_REQUIRED") throw new Error("HITL_AUTHORIZATION_STATE_INVALID");
+  if (row.approval_recovery_state !== "active") throw new Error("HITL_APPROVAL_NOT_ACTIVE");
+  if (row.approval_expires_at && Date.parse(row.approval_expires_at) <= Date.now()) {
+    await db.rpc("sis_agent_hitl_sweep_expired_v1", { p_now: new Date().toISOString(), p_limit: 100 });
+    throw new Error("HITL_APPROVAL_LEASE_EXPIRED");
+  }
   if (await sha256(row.sdk_state) !== row.state_sha256) throw new Error("HITL_SERIALIZED_STATE_HASH_MISMATCH");
 
   const agent = buildAgent(db, hitlId, row.authorization_decision);
@@ -422,17 +445,21 @@ async function resolveHitl(db: SupabaseClient, hitlId: string, decision: "approv
 
   const finalOutput = String(result.finalOutput ?? "").slice(0, 300);
   const status = decision === "approve" ? "approved_resumed" : "rejected_resumed";
-  const { error: updateError } = await db.from("sis_agent_hitl_runs").update({
+  const { data: finalized, error: updateError } = await db.from("sis_agent_hitl_runs").update({
     status,
     resolution: decision,
     resolver_worker_key: RESOLVER,
     resumed_state_sha256: resumedHash,
     sdk_state: null,
     final_output: finalOutput,
+    approval_expires_at: null,
+    approval_recovery_state: "none",
+    approval_last_checked_at: new Date().toISOString(),
     resolved_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-  }).eq("id", hitlId).eq("status", "pending_approval");
+  }).eq("id", hitlId).eq("status", "pending_approval").eq("approval_recovery_state", "active").select("id").maybeSingle();
   if (updateError) throw new Error(`HITL_RESOLUTION_PERSIST_FAILED:${updateError.message}`);
+  if (!finalized) throw new Error("HITL_RESOLUTION_ALREADY_FINALIZED_OR_RECOVERING");
 
   return {
     ok: true,
@@ -447,6 +474,24 @@ async function resolveHitl(db: SupabaseClient, hitlId: string, decision: "approv
     provider_write_performed: false,
     mail_write_performed: false,
   };
+}
+
+async function recoverHitl(db: SupabaseClient, hitlId: string, extendSeconds: number) {
+  const { data, error } = await db.rpc("sis_agent_hitl_recover_expired_v1", {
+    p_hitl_id: hitlId,
+    p_extend_seconds: extendSeconds,
+  });
+  if (error || !data?.ok) throw new Error(`HITL_RECOVERY_FAILED:${error?.message ?? "NO_RESULT"}`);
+  return data;
+}
+
+async function sweepHitl(db: SupabaseClient) {
+  const { data, error } = await db.rpc("sis_agent_hitl_sweep_expired_v1", {
+    p_now: new Date().toISOString(),
+    p_limit: 100,
+  });
+  if (error || !data?.ok) throw new Error(`HITL_SWEEP_FAILED:${error?.message ?? "NO_RESULT"}`);
+  return data;
 }
 
 const traceDb = clients("Bearer bootstrap").admin;
@@ -466,6 +511,19 @@ Deno.serve(async (req: Request) => {
       const decision = String(body.decision ?? "");
       if (!/^[0-9a-f-]{36}$/i.test(hitlId) || !["approve", "reject"].includes(decision)) return json({ ok: false, error: "RESOLUTION_INPUT_INVALID" }, 400);
       return json(await resolveHitl(db, hitlId, decision as "approve" | "reject"));
+    }
+    if (path === "/recover") {
+      const db = await authorizeCaller(req, RESOLVER);
+      let body: Record<string, unknown> = {};
+      try { body = await req.json(); } catch { return json({ ok: false, error: "JSON_REQUIRED" }, 400); }
+      const hitlId = String(body.hitl_id ?? "");
+      const extendSeconds = Number(body.extend_seconds ?? APPROVAL_LEASE_SECONDS);
+      if (!/^[0-9a-f-]{36}$/i.test(hitlId) || !Number.isInteger(extendSeconds) || extendSeconds < 60 || extendSeconds > 86400) return json({ ok: false, error: "RECOVERY_INPUT_INVALID" }, 400);
+      return json(await recoverHitl(db, hitlId, extendSeconds));
+    }
+    if (path === "/sweep") {
+      const db = await authorizeCaller(req, RESOLVER);
+      return json(await sweepHitl(db));
     }
     return json({ ok: false, error: "ROUTE_NOT_FOUND" }, 404);
   } catch (error) {
