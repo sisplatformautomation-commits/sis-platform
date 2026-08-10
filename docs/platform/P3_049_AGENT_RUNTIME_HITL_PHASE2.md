@@ -6,7 +6,7 @@ Status: TEST-only verified, no authorization cutover, no provider write, no PROD
 
 P3-048 remains the authorization decision source. `APPROVAL_REQUIRED` is mapped to an Agents SDK interruption. The paused `RunState` is serialized server-side and later restored for approve/reject and resume.
 
-The resolver path is serialized by a database-side atomic resolution claim before the SDK state is mutated:
+The resolver path is now serialized by a database-side atomic resolution claim before the SDK state is mutated:
 
 `pending_approval -> resolution claim -> RunState approve/reject -> resume -> atomic finalize`
 
@@ -29,7 +29,7 @@ This removes the previous window in which approve and reject could independently
 
 For approve, the claim derives the action fingerprint server-side from the immutable HITL scope (`hitl_id`, environment, resource, action, tool and tool-call id) using SHA-256. A caller does not choose the canonical fingerprint.
 
-P3-049's evidence-only tool is claim-bound. P3-050 further binds its effect ledger to this same claim and canonical fingerprint.
+P3-049's evidence-only tool is claim-bound: it can run only under the matching approve claim. P3-050 further binds its effect ledger to this same claim and canonical fingerprint.
 
 ## TEST regression evidence
 
