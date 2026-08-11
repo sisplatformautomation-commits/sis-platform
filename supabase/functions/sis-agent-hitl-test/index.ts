@@ -15,6 +15,7 @@ const CAPABILITY = "integration.provider_write";
 const RESOURCE_KEY = "make.gmail_trash.test.sis_internal_hospitality";
 const ACTION_KEY = "gmail.trash";
 const TOOL_NAME = "gma_gmail_trash_shadow_action";
+const APPROVAL_LEASE_SECONDS = 3600;
 
 function projectKey(jsonName: string, legacyName: string): string | null {
   const value = Deno.env.get(jsonName);
@@ -144,75 +145,53 @@ function buildAgent(db: SupabaseClient, hitlId: string, authorizationDecision: s
   const evidenceTool = tool({
     name: TOOL_NAME,
     description: "P3-049 TEST-only evidence action. No provider write.",
-    parameters: { type: "object", properties: { hitl_id:{type:"string"}, resource_key:{type:"string"}, action:{type:"string"} }, required:["hitl_id","resource_key","action"], additionalProperties:false } as any,
+    parameters: { type:"object", properties:{hitl_id:{type:"string"},resource_key:{type:"string"},action:{type:"string"}}, required:["hitl_id","resource_key","action"], additionalProperties:false } as any,
     needsApproval: async () => authorizationDecision === "APPROVAL_REQUIRED",
-    execute: async (args: any) => {
-      if (args.hitl_id !== hitlId || args.resource_key !== RESOURCE_KEY || args.action !== ACTION_KEY) throw new Error("HITL_TOOL_SCOPE_MISMATCH");
-      if (!resolutionClaimId) throw new Error("HITL_RESOLUTION_CLAIM_REQUIRED");
-      const now = new Date().toISOString();
-      const { data, error } = await db.from("sis_agent_hitl_runs").update({ tool_execution_count:1, updated_at:now })
-        .eq("id",hitlId).eq("status","pending_approval").eq("resolution_claim_id",resolutionClaimId)
-        .eq("resolution_claim_decision","approve").eq("tool_execution_count",0).select("id").maybeSingle();
-      if (error) throw new Error(`HITL_EVIDENCE_TOOL_FAILED:${error.message}`);
-      if (!data) {
-        const { data: existing, error: readError } = await db.from("sis_agent_hitl_runs")
-          .select("resolution_claim_id,resolution_claim_decision,tool_execution_count").eq("id",hitlId).single();
-        if (readError || existing?.resolution_claim_id !== resolutionClaimId || existing?.resolution_claim_decision !== "approve" || Number(existing?.tool_execution_count) !== 1) {
-          throw new Error("HITL_EVIDENCE_TOOL_NOT_IDEMPOTENT");
-        }
-      }
-      return "EVIDENCE_ONLY_EXECUTED_NO_PROVIDER_WRITE";
+    execute: async (args:any) => {
+      if(args.hitl_id!==hitlId||args.resource_key!==RESOURCE_KEY||args.action!==ACTION_KEY)throw new Error("HITL_TOOL_SCOPE_MISMATCH");
+      if(!resolutionClaimId)throw new Error("HITL_RESOLUTION_CLAIM_REQUIRED");
+      const {data,error}=await db.rpc("sis_agent_hitl_effect_commit_claimed_v2",{p_hitl_id:hitlId,p_claim_id:resolutionClaimId,p_result_code:"EVIDENCE_ONLY_EXECUTED_NO_PROVIDER_WRITE"});
+      if(error||!data?.ok)throw new Error(`HITL_EVIDENCE_EFFECT_COMMIT_FAILED:${error?.message??"NO_RESULT"}`);
+      return String(data.result_code??"EVIDENCE_ONLY_EXECUTED_NO_PROVIDER_WRITE");
     },
   });
-  const model: any = {
-    name: "p3-049-deterministic-hitl-model-v1",
-    async getResponse(request:any) {
-      if (!modelHasToolResult(request.input)) return { usage:new Usage(), output:[{ type:"function_call", name:TOOL_NAME, arguments:JSON.stringify({hitl_id:hitlId,resource_key:RESOURCE_KEY,action:ACTION_KEY}), callId:`call_${hitlId.replaceAll("-","")}`, status:"completed" }] } as any;
-      return { usage:new Usage(), output:[{ type:"message", role:"assistant", status:"completed", content:[{type:"output_text",text:"P3-049 HITL pilot resumed and completed."}] }] } as any;
-    },
-    async *getStreamedResponse(){ yield { type:"response.completed", response:{output:[],usage:new Usage()} } as any; },
+  const model:any={
+    name:"p3-049-deterministic-hitl-model-v1",
+    async getResponse(request:any){if(!modelHasToolResult(request.input))return{usage:new Usage(),output:[{type:"function_call",name:TOOL_NAME,arguments:JSON.stringify({hitl_id:hitlId,resource_key:RESOURCE_KEY,action:ACTION_KEY}),callId:`call_${hitlId.replaceAll("-","")}`,status:"completed"}]} as any;return{usage:new Usage(),output:[{type:"message",role:"assistant",status:"completed",content:[{type:"output_text",text:"P3-049 HITL pilot resumed and completed."}]}]} as any;},
+    async *getStreamedResponse(){yield{type:"response.completed",response:{output:[],usage:new Usage()}} as any;},
   };
-  return new Agent({ name:"P3-049 HITL Pilot Agent", instructions:"Use only the TEST evidence tool. No external writes.", model, tools:[evidenceTool] });
+  return new Agent({name:"P3-049 HITL Pilot Agent",instructions:"Use only the TEST evidence tool. No external writes.",model,tools:[evidenceTool]});
 }
-async function startHitl(db: SupabaseClient) {
-  const hitlId=crypto.randomUUID(), authorization=await p3048Decision(db,hitlId), requestedTraceId=newTraceId(), groupId=`P3-049:HITL:GMA-002:${hitlId.slice(0,8)}`, now=new Date().toISOString();
-  const { error: insertError } = await db.from("sis_agent_hitl_runs").insert({
-    id:hitlId,work_item_key:WORK_ITEM,observed_work_item_key:OBSERVED_WORK_ITEM,environment_key:ENVIRONMENT,actor_key:STARTER,capability_key:CAPABILITY,
-    resource_key:RESOURCE_KEY,action_key:ACTION_KEY,authorization_policy_version:String(authorization.policy_version),authorization_decision:String(authorization.decision),
-    authorization_evaluation_id:authorization.evaluation_id??null,status:"created",sdk_version:SDK_VERSION,trace_id:requestedTraceId,trace_group_id:groupId,
-    metadata:{p3_048_reason_codes:authorization.reason_codes??[],shadow_only_resource:true,evidence_only_tool:true},created_at:now,updated_at:now,
-  });
-  if (insertError) throw new Error(`HITL_ROW_CREATE_FAILED:${insertError.message}`);
+async function startHitl(db:SupabaseClient){
+  const hitlId=crypto.randomUUID(),authorization=await p3048Decision(db,hitlId),requestedTraceId=newTraceId(),groupId=`P3-049:HITL:GMA-002:${hitlId.slice(0,8)}`,nowDate=new Date(),now=nowDate.toISOString(),approvalExpiresAt=new Date(nowDate.getTime()+APPROVAL_LEASE_SECONDS*1000).toISOString();
+  const{error:insertError}=await db.from("sis_agent_hitl_runs").insert({id:hitlId,work_item_key:WORK_ITEM,observed_work_item_key:OBSERVED_WORK_ITEM,environment_key:ENVIRONMENT,actor_key:STARTER,capability_key:CAPABILITY,resource_key:RESOURCE_KEY,action_key:ACTION_KEY,authorization_policy_version:String(authorization.policy_version),authorization_decision:String(authorization.decision),authorization_evaluation_id:authorization.evaluation_id??null,status:"created",sdk_version:SDK_VERSION,trace_id:requestedTraceId,trace_group_id:groupId,metadata:{p3_048_reason_codes:authorization.reason_codes??[],shadow_only_resource:true,evidence_only_tool:true,durability_hardening:"p3_050_native_v2_atomic_resolution_claim"},created_at:now,updated_at:now});
+  if(insertError)throw new Error(`HITL_ROW_CREATE_FAILED:${insertError.message}`);
   const agent=buildAgent(db,hitlId,String(authorization.decision),null);
-  try {
+  try{
     const result=await run(agent,"Execute the P3-049 TEST-only evidence action.",{workflowName:"SIS P3-049 HITL Phase 2",traceId:requestedTraceId,groupId,traceIncludeSensitiveData:false,traceMetadata:{work_item_key:WORK_ITEM,observed_work_item_key:OBSERVED_WORK_ITEM,environment_key:ENVIRONMENT,hitl_id:hitlId,p3_048_decision:"APPROVAL_REQUIRED"},maxTurns:3} as any);
-    await getGlobalTraceProvider().forceFlush();
-    const interruptions=result.interruptions??[]; if(interruptions.length!==1) throw new Error(`EXPECTED_ONE_INTERRUPTION_GOT_${interruptions.length}`);
-    const state=result.state.toString({includeTracingApiKey:false}), canonicalTraceId=serializedTraceId(state); if(!canonicalTraceId) throw new Error("SERIALIZED_TRACE_ID_MISSING_AT_INTERRUPTION");
-    const stateHash=await sha256(state), interruption:any=interruptions[0], toolCallId=interruption.rawItem?.callId??interruption.rawItem?.call_id??null;
-    const { data:persisted,error }=await db.from("sis_agent_hitl_runs").update({status:"pending_approval",sdk_state:state,state_sha256:stateHash,interruption_count:1,tool_name:String(interruption.name??TOOL_NAME),tool_call_id:toolCallId,updated_at:now}).eq("id",hitlId).eq("status","created").select("id").maybeSingle();
-    if(error) throw new Error(`HITL_PENDING_PERSIST_FAILED:${error.message}`); if(!persisted) throw new Error("HITL_PENDING_PERSIST_CAS_FAILED");
-    return {ok:true,hitl_id:hitlId,status:"pending_approval",p3_048_decision:authorization.decision,interruption_count:1,tool_name:String(interruption.name??TOOL_NAME),trace_id:canonicalTraceId,trace_group_id:groupId,state_sha256:stateHash,tool_execution_count:0,provider_write_performed:false,mail_write_performed:false};
-  } catch(error) {
-    await db.from("sis_agent_hitl_runs").update({status:"failed",error_summary:String(error).slice(0,300),updated_at:new Date().toISOString()}).eq("id",hitlId).eq("status","created");
-    throw error;
-  }
+    await getGlobalTraceProvider().forceFlush();const interruptions=result.interruptions??[];if(interruptions.length!==1)throw new Error(`EXPECTED_ONE_INTERRUPTION_GOT_${interruptions.length}`);
+    const state=result.state.toString({includeTracingApiKey:false}),canonicalTraceId=serializedTraceId(state);if(!canonicalTraceId)throw new Error("SERIALIZED_TRACE_ID_MISSING_AT_INTERRUPTION");const stateHash=await sha256(state),interruption:any=interruptions[0],toolCallId=interruption.rawItem?.callId??interruption.rawItem?.call_id??null;
+    const{data:persisted,error}=await db.from("sis_agent_hitl_runs").update({status:"pending_approval",sdk_state:state,state_sha256:stateHash,interruption_count:1,tool_name:String(interruption.name??TOOL_NAME),tool_call_id:toolCallId,approval_expires_at:approvalExpiresAt,approval_last_checked_at:now,approval_recovery_state:"active",updated_at:now}).eq("id",hitlId).eq("status","created").select("id").maybeSingle();
+    if(error)throw new Error(`HITL_PENDING_PERSIST_FAILED:${error.message}`);if(!persisted)throw new Error("HITL_PENDING_PERSIST_CAS_FAILED");
+    return{ok:true,hitl_id:hitlId,status:"pending_approval",p3_048_decision:authorization.decision,interruption_count:1,tool_name:String(interruption.name??TOOL_NAME),trace_id:canonicalTraceId,trace_group_id:groupId,state_sha256:stateHash,approval_expires_at:approvalExpiresAt,approval_recovery_state:"active",tool_execution_count:0,provider_write_performed:false,mail_write_performed:false};
+  }catch(error){await db.from("sis_agent_hitl_runs").update({status:"failed",error_summary:String(error).slice(0,300),updated_at:new Date().toISOString()}).eq("id",hitlId).eq("status","created");throw error;}
 }
 async function resolvedSnapshot(db:SupabaseClient,hitlId:string){const{data,error}=await db.rpc("sis_agent_hitl_read_v1",{p_hitl_id:hitlId});if(error||!data)throw new Error(`HITL_READ_FAILED:${error?.message??"NO_RESULT"}`);return data as Record<string,any>;}
 async function resolveHitl(db:SupabaseClient,hitlId:string,decision:"approve"|"reject"){
-  const {data:row,error}=await db.from("sis_agent_hitl_runs").select("*").eq("id",hitlId).maybeSingle(); if(error||!row)throw new Error("HITL_RUN_NOT_FOUND");
+  const{data:row,error}=await db.from("sis_agent_hitl_runs").select("*").eq("id",hitlId).maybeSingle();if(error||!row)throw new Error("HITL_RUN_NOT_FOUND");
   if(row.status==="approved_resumed"||row.status==="rejected_resumed"){const snap=await resolvedSnapshot(db,hitlId);if(snap.resolution!==decision)throw new Error("RESOLUTION_ALREADY_CLAIMED");return{ok:true,idempotent:true,hitl_id:hitlId,resolution:decision,status:snap.status,trace_id:snap.trace_id,same_trace_resumed:true,tool_execution_count:snap.tool_execution_count,provider_write_performed:false,mail_write_performed:false};}
-  if(row.status!=="pending_approval"||!row.sdk_state||!row.state_sha256)throw new Error("HITL_RUN_NOT_PENDING"); if(row.authorization_decision!=="APPROVAL_REQUIRED")throw new Error("HITL_AUTHORIZATION_STATE_INVALID"); if(await sha256(row.sdk_state)!==row.state_sha256)throw new Error("HITL_SERIALIZED_STATE_HASH_MISMATCH");
-  const {data:claim,error:claimError}=await db.rpc("sis_agent_hitl_resolution_claim_v1",{p_hitl_id:hitlId,p_decision:decision,p_resolver_worker_key:RESOLVER}); if(claimError||!claim?.ok||!claim?.claim_id)throw new Error(`HITL_RESOLUTION_CLAIM_FAILED:${claimError?.message??"NO_RESULT"}`);
+  if(row.status!=="pending_approval"||!row.sdk_state||!row.state_sha256)throw new Error("HITL_RUN_NOT_PENDING");if(row.authorization_decision!=="APPROVAL_REQUIRED")throw new Error("HITL_AUTHORIZATION_STATE_INVALID");if(await sha256(row.sdk_state)!==row.state_sha256)throw new Error("HITL_SERIALIZED_STATE_HASH_MISMATCH");
+  const{data:claim,error:claimError}=await db.rpc("sis_agent_hitl_resolution_claim_v1",{p_hitl_id:hitlId,p_decision:decision,p_resolver_worker_key:RESOLVER});if(claimError||!claim?.ok||!claim?.claim_id)throw new Error(`HITL_RESOLUTION_CLAIM_FAILED:${claimError?.message??"NO_RESULT"}`);
   if(claim.completed===true){const snap=await resolvedSnapshot(db,hitlId);return{ok:true,idempotent:true,hitl_id:hitlId,resolution:decision,status:snap.status,trace_id:snap.trace_id,same_trace_resumed:true,tool_execution_count:snap.tool_execution_count,provider_write_performed:false,mail_write_performed:false};}
-  const claimId=String(claim.claim_id), agent=buildAgent(db,hitlId,row.authorization_decision,claimId), state=await RunState.fromString(agent,row.sdk_state), interruptions=state.getInterruptions(); if(interruptions.length!==1)throw new Error(`RESTORED_INTERRUPTION_COUNT_${interruptions.length}`);
-  const restoredSerialized=state.toString({includeTracingApiKey:false}); if(serializedTraceId(restoredSerialized)!==row.trace_id)throw new Error("RESTORED_SERIALIZED_TRACE_ID_MISMATCH");
+  const claimId=String(claim.claim_id),agent=buildAgent(db,hitlId,row.authorization_decision,claimId),state=await RunState.fromString(agent,row.sdk_state),interruptions=state.getInterruptions();if(interruptions.length!==1)throw new Error(`RESTORED_INTERRUPTION_COUNT_${interruptions.length}`);
+  const restoredSerialized=state.toString({includeTracingApiKey:false});if(serializedTraceId(restoredSerialized)!==row.trace_id)throw new Error("RESTORED_SERIALIZED_TRACE_ID_MISMATCH");
   if(decision==="approve")state.approve(interruptions[0]);else state.reject(interruptions[0],{message:"P3-049 TEST rejection: no provider action executed."});
-  const result=await run(agent,state,{traceIncludeSensitiveData:false,maxTurns:3} as any); await getGlobalTraceProvider().forceFlush(); if((result.interruptions??[]).length!==0)throw new Error("HITL_RESUME_STILL_INTERRUPTED");
-  const resumedSerialized=result.state.toString({includeTracingApiKey:false}); if(serializedTraceId(resumedSerialized)!==row.trace_id)throw new Error("RESUMED_SERIALIZED_TRACE_ID_MISMATCH");
-  const resumedHash=await sha256(resumedSerialized), finalOutput=String(result.finalOutput??"").slice(0,300);
-  const {data:finalized,error:finalizeError}=await db.rpc("sis_agent_hitl_resolution_finalize_v1",{p_hitl_id:hitlId,p_claim_id:claimId,p_resumed_state_sha256:resumedHash,p_final_output:finalOutput}); if(finalizeError||!finalized?.ok)throw new Error(`HITL_RESOLUTION_FINALIZE_FAILED:${finalizeError?.message??"NO_RESULT"}`);
+  const result=await run(agent,state,{traceIncludeSensitiveData:false,maxTurns:3} as any);await getGlobalTraceProvider().forceFlush();if((result.interruptions??[]).length!==0)throw new Error("HITL_RESUME_STILL_INTERRUPTED");
+  const resumedSerialized=result.state.toString({includeTracingApiKey:false});if(serializedTraceId(resumedSerialized)!==row.trace_id)throw new Error("RESUMED_SERIALIZED_TRACE_ID_MISMATCH");const resumedHash=await sha256(resumedSerialized),finalOutput=String(result.finalOutput??"").slice(0,300);
+  const{data:finalized,error:finalizeError}=await db.rpc("sis_agent_hitl_resolution_finalize_v1",{p_hitl_id:hitlId,p_claim_id:claimId,p_resumed_state_sha256:resumedHash,p_final_output:finalOutput});if(finalizeError||!finalized?.ok)throw new Error(`HITL_RESOLUTION_FINALIZE_FAILED:${finalizeError?.message??"NO_RESULT"}`);
   return{ok:true,idempotent:Boolean(finalized.idempotent),hitl_id:hitlId,resolution:decision,status:String(finalized.status),trace_id:row.trace_id,same_trace_resumed:true,interruption_count_after_resume:0,tool_execution_count:Number(finalized.tool_execution_count??0),final_output:finalOutput,resolution_claim_id:claimId,provider_write_performed:false,mail_write_performed:false};
 }
-const traceDb=clients("Bearer bootstrap").admin; setTracingDisabled(false); setTraceProcessors([new SisTraceProcessor(traceDb)]);
-Deno.serve(async(req:Request)=>{if(req.method!=="POST")return json({ok:false,error:"METHOD_NOT_ALLOWED"},405);const path=routePath(req);try{if(path==="/start")return json(await startHitl(await authorizeCaller(req,STARTER)));if(path==="/resolve"){const db=await authorizeCaller(req,RESOLVER);let body:Record<string,unknown>={};try{body=await req.json();}catch{return json({ok:false,error:"JSON_REQUIRED"},400);}const hitlId=String(body.hitl_id??""),decision=String(body.decision??"");if(!/^[0-9a-f-]{36}$/i.test(hitlId)||!["approve","reject"].includes(decision))return json({ok:false,error:"RESOLUTION_INPUT_INVALID"},400);return json(await resolveHitl(db,hitlId,decision as "approve"|"reject"));}return json({ok:false,error:"ROUTE_NOT_FOUND"},404);}catch(error){const message=String(error instanceof Error?error.message:error).slice(0,300),authError=message.includes("AUTHORIZATION_REQUIRED")||message.includes("AUTHENTICATED_SUBJECT_REQUIRED")||message.includes("BOUND_RUNTIME_SUBJECT_REQUIRED");return json({ok:false,error:message},authError?401:409);}});
+async function recoverHitl(db:SupabaseClient,hitlId:string,extendSeconds:number){const{data,error}=await db.rpc("sis_agent_hitl_recover_expired_v1",{p_hitl_id:hitlId,p_extend_seconds:extendSeconds});if(error||!data?.ok)throw new Error(`HITL_RECOVERY_FAILED:${error?.message??"NO_RESULT"}`);return data;}
+async function sweepHitl(db:SupabaseClient){const{data,error}=await db.rpc("sis_agent_hitl_sweep_expired_v1",{p_now:new Date().toISOString(),p_limit:100});if(error||!data?.ok)throw new Error(`HITL_SWEEP_FAILED:${error?.message??"NO_RESULT"}`);return data;}
+const traceDb=clients("Bearer bootstrap").admin;setTracingDisabled(false);setTraceProcessors([new SisTraceProcessor(traceDb)]);
+Deno.serve(async(req:Request)=>{if(req.method!=="POST")return json({ok:false,error:"METHOD_NOT_ALLOWED"},405);const path=routePath(req);try{if(path==="/start")return json(await startHitl(await authorizeCaller(req,STARTER)));if(path==="/resolve"){const db=await authorizeCaller(req,RESOLVER);let body:Record<string,unknown>={};try{body=await req.json();}catch{return json({ok:false,error:"JSON_REQUIRED"},400);}const hitlId=String(body.hitl_id??""),decision=String(body.decision??"");if(!/^[0-9a-f-]{36}$/i.test(hitlId)||!["approve","reject"].includes(decision))return json({ok:false,error:"RESOLUTION_INPUT_INVALID"},400);return json(await resolveHitl(db,hitlId,decision as "approve"|"reject"));}if(path==="/recover"){const db=await authorizeCaller(req,RESOLVER);let body:Record<string,unknown>={};try{body=await req.json();}catch{return json({ok:false,error:"JSON_REQUIRED"},400);}const hitlId=String(body.hitl_id??""),extendSeconds=Number(body.extend_seconds??APPROVAL_LEASE_SECONDS);if(!/^[0-9a-f-]{36}$/i.test(hitlId)||!Number.isInteger(extendSeconds)||extendSeconds<60||extendSeconds>86400)return json({ok:false,error:"RECOVERY_INPUT_INVALID"},400);return json(await recoverHitl(db,hitlId,extendSeconds));}if(path==="/sweep"){const db=await authorizeCaller(req,RESOLVER);return json(await sweepHitl(db));}return json({ok:false,error:"ROUTE_NOT_FOUND"},404);}catch(error){const message=String(error instanceof Error?error.message:error).slice(0,300),authError=message.includes("AUTHORIZATION_REQUIRED")||message.includes("AUTHENTICATED_SUBJECT_REQUIRED")||message.includes("BOUND_RUNTIME_SUBJECT_REQUIRED");return json({ok:false,error:message},authError?401:409);}});
