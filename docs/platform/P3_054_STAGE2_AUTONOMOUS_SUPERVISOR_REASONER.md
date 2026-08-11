@@ -27,9 +27,11 @@ No direct service-role planning path is introduced.
 
 ## Model configuration
 
-Default model: `gpt-5.6-terra`.
+Stage 2 intentionally has **no hardcoded fallback model**. `SIS_SUPERVISOR_MODEL` must be explicitly configured to a currently approved OpenAI API model before the reasoner can claim a dispatch.
 
-The model can be overridden with `SIS_SUPERVISOR_MODEL` in the Edge Function environment. Stage 2 uses low reasoning effort for the bootstrap because model calls occur only after a durable dispatch has been claimed, not while the controller is idle.
+If `SIS_SUPERVISOR_MODEL` is missing or blank, the route fails closed with `SIS_SUPERVISOR_MODEL_MISSING` and performs no claim or model call. This avoids silently depending on a stale or unverified model identifier.
+
+Stage 2 uses low reasoning effort for the bootstrap because model calls occur only after a durable dispatch has been claimed, not while the controller is idle.
 
 Requests use `store: false` and a strict JSON-schema plan response.
 
@@ -84,7 +86,8 @@ If model configuration is missing, model output is invalid, the activation lacks
 
 - no job is submitted,
 - no provider call occurs,
-- the dispatch remains protected by its supervisor lease,
+- missing model configuration fails before a dispatch is claimed,
+- otherwise the dispatch remains protected by its supervisor lease,
 - the existing controller lease-recovery path can return it to `awaiting_supervisor` after expiry.
 
 Stage 2 intentionally does not add a new privileged "mark blocked" RPC in this phase.
@@ -119,7 +122,7 @@ Before enabling a continuous scheduler:
 
 1. Confirm `verify_jwt=true` on both DEV/TEST agent runtime functions.
 2. Confirm `OPENAI_API_KEY` is present without exposing its value.
-3. Confirm `SIS_SUPERVISOR_MODEL` resolves to the approved model or uses the documented default.
+3. Explicitly configure `SIS_SUPERVISOR_MODEL` to a currently approved and available OpenAI API model; there is no fallback model.
 4. Create a TEST-only fixture activation with `reasoner_mode=read_only_autonomous` and a `runtime.read`-only objective.
 5. Invoke `/orchestration/reason` with the bound TEST `sis.supervisor` identity.
 6. Verify exactly one job is planned through `sis_agent_supervisor_queue_job_v1`.
