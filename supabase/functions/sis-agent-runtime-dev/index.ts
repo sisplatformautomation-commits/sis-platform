@@ -3,7 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 
 const SLUG = "sis-agent-runtime-dev";
 const ENVIRONMENT = "dev";
-const REASONER_MODEL = Deno.env.get("SIS_SUPERVISOR_MODEL") ?? "gpt-5.6-terra";
+const REASONER_MODEL = Deno.env.get("SIS_SUPERVISOR_MODEL")?.trim() ?? "";
 const REASONER_EFFORT = "low";
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -87,6 +87,7 @@ const PLAN_SCHEMA = {
 async function autonomousReason(db: ReturnType<typeof createClient>) {
   const openaiKey = Deno.env.get("OPENAI_API_KEY");
   if (!openaiKey) return json({ ok: false, error: "OPENAI_API_KEY_MISSING" }, 503);
+  if (!REASONER_MODEL) return json({ ok: false, error: "SIS_SUPERVISOR_MODEL_MISSING" }, 503);
 
   const { data: claim, error: claimError } = await db.rpc("sis_supervisor_dispatch_claim_v1", { p_lease_seconds: 900 });
   if (claimError) return json({ ok: false, error: "P3_054_REASONER_CLAIM_FAILED" }, 409);
