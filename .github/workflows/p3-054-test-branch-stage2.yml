@@ -1,0 +1,89 @@
+name: P3-054 Stage2 TEST Branch
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/p3-054-test-branch-stage2.yml"
+      - "scripts/p3_054_stage2_test_branch.sh"
+      - "docs/platform/P3_054_TEST_BRANCH_STAGE2_DEPLOY.md"
+      - "supabase/functions/sis-agent-runtime-dev/**"
+      - "supabase/functions/sis-agent-runtime-test/**"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "P3-054 action"
+        required: true
+        type: choice
+        options:
+          - preflight
+          - deploy-smoke
+        default: preflight
+      confirm_test_ref:
+        description: "For deploy-smoke, enter the exact TEST branch project ref"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p3-054-stage2-test-branch
+  cancel-in-progress: false
+
+env:
+  SUPABASE_PROJECT_ID: uwgkwyxjuikqxsezkezj
+  P3_054_PARENT_PROJECT_REF: uwgkwyxjuikqxsezkezj
+  P3_054_TEST_BRANCH_NAME: sis-platform-test
+  P3_054_TEST_PROJECT_REF: ohoqdlufghlhmceokgpv
+  SIS_SUPERVISOR_MODEL: gpt-5.6-terra
+
+jobs:
+  preflight:
+    name: TEST branch preflight
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Require Supabase CI credential
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+            echo "SUPABASE_ACCESS_TOKEN repository secret is required for the P3-054 TEST branch workflow." >&2
+            exit 1
+          fi
+
+      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf
+        with:
+          version: latest
+
+      - name: Verify TEST branch target and contracts
+        shell: bash
+        run: bash scripts/p3_054_stage2_test_branch.sh preflight
+
+  deploy-smoke:
+    name: JWT-only deploy and TEST reasoner smoke
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy-smoke' }}
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: p3-054-test
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      P3_054_CONFIRM_TEST_REF: ${{ inputs.confirm_test_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf
+        with:
+          version: latest
+
+      - name: Deploy Stage2 and run self-cleaning TEST smoke
+        shell: bash
+        run: bash scripts/p3_054_stage2_test_branch.sh deploy-smoke
