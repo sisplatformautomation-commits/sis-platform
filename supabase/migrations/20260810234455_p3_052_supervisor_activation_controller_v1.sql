@@ -19,11 +19,10 @@ set updated_at=now(), metadata=excluded.metadata;
 insert into public.sis_agent_workers(
   worker_key,worker_role,domain_key,status,max_concurrency,runtime_binding,metadata
 ) values (
-  'sis.controller.orchestration','supervisor','orchestration','active',1,
+  'sis.control_supervisor','supervisor','orchestration','active',1,
   jsonb_build_object('binding','logical','provider_actions',false),
   jsonb_build_object(
     'p3','P3-052',
-    'canonical_name','SIS Execution Controller',
     'self_execution',false,
     'worker_selection',false,
     'approval_creation',false,
@@ -39,7 +38,7 @@ set status='active',
 insert into public.sis_agent_worker_capabilities(
   worker_key,capability_key,environment_key,active,metadata
 )
-select 'sis.controller.orchestration',c.capability_key,e.environment_key,true,
+select 'sis.control_supervisor',c.capability_key,e.environment_key,true,
        jsonb_build_object('p3','P3-052','scope','dev_test_only')
 from (values ('orchestration.start'),('orchestration.observe'),('orchestration.stop')) c(capability_key)
 cross join (values ('dev'),('test')) e(environment_key)
@@ -53,7 +52,7 @@ create table if not exists public.sis_supervisor_activations (
   environment_key text not null check (environment_key in ('dev','test')),
   execution_intent text not null check (execution_intent in ('start','execute','implement')),
   requested_by text not null check (length(btrim(requested_by)) between 1 and 160),
-  controller_worker_key text not null default 'sis.controller.orchestration',
+  controller_worker_key text not null default 'sis.control_supervisor',
   supervisor_worker_key text not null default 'sis.supervisor',
   status text not null default 'requested' check (status in ('requested','claimed','completed','cancelled','failed')),
   correlation_id uuid not null default gen_random_uuid(),
@@ -98,9 +97,9 @@ begin
 
   if not exists(
     select 1 from public.sis_agent_worker_capabilities wc
-    where wc.worker_key='sis.controller.orchestration' and wc.capability_key='orchestration.start'
+    where wc.worker_key='sis.control_supervisor' and wc.capability_key='orchestration.start'
       and wc.environment_key=v_env and wc.active
-  ) then raise exception 'ORCHESTRATION_CONTROLLER_NOT_AUTHORIZED'; end if;
+  ) then raise exception 'CONTROL_SUPERVISOR_NOT_AUTHORIZED'; end if;
 
   if not exists(
     select 1 from public.sis_agent_workers w
@@ -138,7 +137,6 @@ begin
     v_work_item.id,v_work_item.item_key,v_env,v_intent,btrim(p_requested_by),
     p_metadata || jsonb_build_object(
       'controller_version','p3-052-v1',
-      'controller_worker_key','sis.controller.orchestration',
       'work_item_requires_approval',coalesce(v_work_item.requires_approval,false)
     )
   ) returning * into v_activation;
