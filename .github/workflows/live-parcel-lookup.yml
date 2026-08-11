@@ -1,0 +1,148 @@
+name: live parcel lookup
+
+on:
+  push:
+    branches:
+      - feature/brandenburg-bplan
+    paths:
+      - .github/workflows/live-parcel-lookup.yml
+
+jobs:
+  lookup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve parcel and fetch official map sources
+        shell: bash
+        run: |
+          mkdir -p parcel-check
+          node <<'NODE'
+          import fs from 'node:fs';
+          const address = 'Mahlower Straße 150, 14513 Teltow';
+
+          function pointFromWkt(wkt) {
+            const nums = String(wkt ?? '').match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+            return nums.length >= 2 ? [nums[0], nums[1]] : null;
+          }
+
+          const searchUrl = new URL('https://search.geobasis-bb.de/v2/search');
+          searchUrl.searchParams.set('query', address);
+          searchUrl.searchParams.set('limit', '20');
+          searchUrl.searchParams.set('complex', 'true');
+          const searchResponse = await fetch(searchUrl, { headers: { accept: 'application/json' } });
+          if (!searchResponse.ok) throw new Error(`Search API ${searchResponse.status}`);
+          const search = await searchResponse.json();
+          const exact = (search.results ?? []).find(r => r.title === address)
+            ?? (search.results ?? []).find(r => /Mahlower Straße 150/i.test(r.title ?? ''));
+          if (!exact) throw new Error('Exact address not found');
+          const point = pointFromWkt(exact.categoryResult?.position ?? exact.geometry);
+          if (!point) throw new Error('Address point missing');
+          const [lon, lat] = point;
+          const parcelHint = exact.categoryResult?.cadastralParcels?.[0];
+          if (!parcelHint) throw new Error('No cadastral parcel hint');
+
+          const itemsUrl = new URL('https://ogc-api.geobasis-bb.de/alkis-vereinfacht/v1/collections/flurstueck/items');
+          itemsUrl.searchParams.set('bbox', `${lon - 0.002},${lat - 0.002},${lon + 0.002},${lat + 0.002}`);
+          itemsUrl.searchParams.set('limit', '100');
+          itemsUrl.searchParams.set('f', 'json');
+          const parcelResponse = await fetch(itemsUrl, { headers: { accept: 'application/geo+json, application/json' } });
+          if (!parcelResponse.ok) throw new Error(`ALKIS API ${parcelResponse.status}`);
+          const collection = await parcelResponse.json();
+          const parcel = (collection.features ?? []).find(f => f.properties?.flstkennz === parcelHint);
+          if (!parcel) throw new Error(`Parcel ${parcelHint} not found`);
+
+          fs.writeFileSync('parcel-check/parcel.geojson', JSON.stringify({type:'FeatureCollection', features:[parcel]}, null, 2));
+
+          const polygons = parcel.geometry.type === 'Polygon' ? [parcel.geometry.coordinates] : parcel.geometry.coordinates;
+          const ring = polygons[0][0];
+          const lons = ring.map(p => p[0]);
+          const lats = ring.map(p => p[1]);
+          const pad = 0.00028;
+          const minLon = Math.min(...lons) - pad;
+          const maxLon = Math.max(...lons) + pad;
+          const minLat = Math.min(...lats) - pad;
+          const maxLat = Math.max(...lats) + pad;
+          const meanLat = (minLat + maxLat) / 2;
+          const widthM = (maxLon - minLon) * 111320 * Math.cos(meanLat * Math.PI / 180);
+          const heightM = (maxLat - minLat) * 110540;
+          const width = 1800;
+          const height = Math.max(1000, Math.min(3000, Math.round(width * heightM / widthM)));
+
+          async function fetchWms(baseUrl, layers, format, output, extra = {}) {
+            const wms = new URL(baseUrl);
+            wms.searchParams.set('SERVICE', 'WMS');
+            wms.searchParams.set('VERSION', '1.1.1');
+            wms.searchParams.set('REQUEST', 'GetMap');
+            wms.searchParams.set('LAYERS', layers);
+            wms.searchParams.set('STYLES', '');
+            wms.searchParams.set('SRS', 'EPSG:4326');
+            wms.searchParams.set('BBOX', `${minLon},${minLat},${maxLon},${maxLat}`);
+            wms.searchParams.set('WIDTH', String(width));
+            wms.searchParams.set('HEIGHT', String(height));
+            wms.searchParams.set('FORMAT', format);
+            for (const [key, value] of Object.entries(extra)) wms.searchParams.set(key, value);
+            const response = await fetch(wms);
+            if (!response.ok) throw new Error(`WMS ${response.status} ${await response.text()}`);
+            fs.writeFileSync(output, Buffer.from(await response.arrayBuffer()));
+            return wms.toString();
+          }
+
+          const orthophotoUrl = await fetchWms(
+            'https://isk.geobasis-bb.de/mapproxy/dop20c/service/wms',
+            'bebb_dop20c',
+            'image/jpeg',
+            'parcel-check/orthophoto.jpg'
+          );
+
+          const bplanUrl = await fetchWms(
+            'https://www.geoportal-teltow.de/isk/telt_bp23',
+            'raster,bp_plan,bp_baugebietsteilflaeche',
+            'image/png',
+            'parcel-check/bplan.png',
+            { TRANSPARENT: 'TRUE' }
+          );
+
+          const px = ([x,y]) => [
+            (x - minLon) / (maxLon - minLon) * width,
+            (maxLat - y) / (maxLat - minLat) * height
+          ];
+          const points = ring.map(p => px(p).map(v => v.toFixed(1)).join(',')).join(' ');
+          const [pointX, pointY] = px(point);
+          const scale50 = 50 / widthM * width;
+          function overlay(background, filename) {
+            const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+              <image href="${background}" x="0" y="0" width="${width}" height="${height}"/>
+              <polygon points="${points}" fill="none" stroke="#ff2020" stroke-width="8"/>
+              <circle cx="${pointX}" cy="${pointY}" r="12" fill="#00ffff" stroke="#000" stroke-width="3"/>
+              <line x1="60" y1="${height-70}" x2="${60+scale50}" y2="${height-70}" stroke="#ff2020" stroke-width="8"/>
+              <text x="60" y="${height-85}" font-size="34" font-family="sans-serif" fill="#ff2020">50 m</text>
+            </svg>`;
+            fs.writeFileSync(`parcel-check/${filename}`, svg);
+          }
+          overlay('orthophoto.jpg', 'orthophoto-overlay.svg');
+          overlay('bplan.png', 'bplan-overlay.svg');
+
+          const meta = {
+            address,
+            point: {lon, lat},
+            flstkennz: parcel.properties?.flstkennz,
+            gemarkung: parcel.properties?.gemarkung,
+            flur: parcel.properties?.flur,
+            flurstueck: parcel.properties?.flstnrzae,
+            cadastralAreaM2: parcel.properties?.flaeche,
+            bbox: [minLon,minLat,maxLon,maxLat],
+            image: {width,height,widthM,heightM},
+            orthophotoSource: 'LGB Brandenburg DOP20c WMS',
+            bplanSource: 'Stadt Teltow B-27a WMS',
+            orthophotoUrl,
+            bplanUrl
+          };
+          fs.writeFileSync('parcel-check/meta.json', JSON.stringify(meta, null, 2));
+          console.log('RESULT=' + JSON.stringify(meta));
+          NODE
+
+      - name: Upload verification images
+        uses: actions/upload-artifact@v4
+        with:
+          name: teltow-parcel-map-check
+          path: parcel-check/
+          retention-days: 1

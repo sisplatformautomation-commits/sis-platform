@@ -1,0 +1,35 @@
+name: list B-Plan 8 parcel areas
+
+on:
+  push:
+    branches: [feature/brandenburg-bplan]
+    paths: [.github/workflows/list-bplan8-parcel-areas.yml]
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query ALKIS parcel areas
+        shell: bash
+        run: |
+          node <<'NODE'
+          const url = new URL('https://ogc-api.geobasis-bb.de/alkis-vereinfacht/v1/collections/flurstueck/items');
+          url.searchParams.set('bbox','13.255886,52.401955,13.256484,52.402471');
+          url.searchParams.set('limit','1000');
+          url.searchParams.set('f','json');
+          const response = await fetch(url, {headers:{accept:'application/geo+json,application/json'}});
+          const data = await response.json();
+          if (!response.ok) throw new Error(`ALKIS ${response.status}: ${JSON.stringify(data).slice(0,500)}`);
+          const rows = (data.features ?? []).map(f => {
+            const p = f.properties ?? {};
+            return {
+              areaM2: Number(p.flaeche),
+              gemarkung: p.gemarkung ?? null,
+              flur: p.flur ?? null,
+              flurstueck: [p.flstnrzae,p.flstnrnen].filter(v => v !== null && v !== undefined && v !== '').join('/'),
+              lage: p.lagebeztxt ?? null,
+              flstkennz: p.flstkennz ?? null
+            };
+          }).sort((a,b) => a.areaM2 - b.areaM2);
+          console.log('PARCEL_AREAS=' + JSON.stringify(rows));
+          NODE

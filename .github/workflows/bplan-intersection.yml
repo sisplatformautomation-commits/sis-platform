@@ -1,0 +1,69 @@
+name: bplan intersection
+
+on:
+  push:
+    branches:
+      - feature/brandenburg-bplan
+    paths:
+      - .github/workflows/bplan-intersection.yml
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch parcel and B-27a WFS geometry
+        shell: bash
+        run: |
+          mkdir -p bplan-check
+          node <<'NODE'
+          import fs from 'node:fs';
+          const address = 'Mahlower Straße 150, 14513 Teltow';
+          const s = new URL('https://search.geobasis-bb.de/v2/search');
+          s.searchParams.set('query', address);
+          s.searchParams.set('limit', '5');
+          s.searchParams.set('complex', 'true');
+          const sr = await fetch(s);
+          const sj = await sr.json();
+          const hit = sj.results.find(r => r.title === address);
+          if (!hit) throw new Error('address not found');
+          const hint = hit.categoryResult.cadastralParcels[0];
+          const nums = hit.geometry.match(/-?\d+(?:\.\d+)?/g).map(Number);
+          const [lon,lat] = nums;
+
+          const p = new URL('https://ogc-api.geobasis-bb.de/alkis-vereinfacht/v1/collections/flurstueck/items');
+          p.searchParams.set('bbox', `${lon-0.003},${lat-0.003},${lon+0.003},${lat+0.003}`);
+          p.searchParams.set('limit','100'); p.searchParams.set('f','json');
+          const pj = await (await fetch(p)).json();
+          const parcel = pj.features.find(f => f.properties.flstkennz === hint);
+          if (!parcel) throw new Error('parcel not found');
+          fs.writeFileSync('bplan-check/parcel.geojson', JSON.stringify(parcel, null, 2));
+
+          const coords = (parcel.geometry.type === 'Polygon' ? parcel.geometry.coordinates : parcel.geometry.coordinates[0])[0];
+          const lons = coords.map(c=>c[0]), lats = coords.map(c=>c[1]);
+          const minLon=Math.min(...lons)-0.0002, maxLon=Math.max(...lons)+0.0002;
+          const minLat=Math.min(...lats)-0.0002, maxLat=Math.max(...lats)+0.0002;
+
+          const w = new URL('https://www.geoportal-teltow.de/isk/telt_bp23');
+          w.searchParams.set('service','WFS');
+          w.searchParams.set('version','1.1.0');
+          w.searchParams.set('request','GetFeature');
+          w.searchParams.set('typeName','ms:bp_baugebietsteilflaeche');
+          w.searchParams.set('srsName','EPSG:4326');
+          w.searchParams.set('maxFeatures','100');
+          // WFS 1.1 EPSG:4326 axis order is latitude, longitude.
+          w.searchParams.set('bbox', `${minLat},${minLon},${maxLat},${maxLon},EPSG:4326`);
+          const wr = await fetch(w, {headers:{accept:'application/gml+xml,text/xml'}});
+          const xml = await wr.text();
+          if (!wr.ok) throw new Error(`WFS ${wr.status}: ${xml.slice(0,500)}`);
+          fs.writeFileSync('bplan-check/baugebiet.gml', xml);
+          fs.writeFileSync('bplan-check/meta.json', JSON.stringify({address, hint, lon, lat, bbox:[minLon,minLat,maxLon,maxLat], wfsUrl:w.toString()}, null, 2));
+          console.log('GML_LENGTH=' + xml.length);
+          console.log('FEATURES=' + (xml.match(/bp_baugebietsteilflaeche/g)?.length ?? 0));
+          console.log('METRICS=' + JSON.stringify([...xml.matchAll(/<(?:\w+:)?(GRZ|GFZ|GRZmin|GRZmax|GFZmin|GFZmax)>\s*([^<]+)</gi)].map(m=>[m[1],m[2]])));
+          NODE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: teltow-bplan-intersection
+          path: bplan-check/
+          retention-days: 1
