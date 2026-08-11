@@ -1,7 +1,7 @@
 # P3-052 – SIS Execution Controller / Supervisor Activation
 
 Stand: 2026-08-11
-Status: DEV/TEST identity v2 verified; no PROD promotion; no merge.
+Status: current-main synchronized; TEST regression PASS; no PROD promotion; no merge.
 
 ## Ziel
 
@@ -119,6 +119,49 @@ Verifiziert auf `sis-platform-test`:
 
 Die vorangegangene P3-052-Regression fuer serverseitige Worker-Auswahl und P3-045-Delegation bleibt als bestehende Test-Evidence erhalten. Die Identity-v2-Regression hat den Delegations-RPC bewusst nicht ausgefuehrt und damit keinen Worker Attempt gestartet.
 
+## Synchronisierung mit aktuellem main
+
+PR #17 wurde mit dem aktuellen `main` synchronisiert:
+
+- `main`: `5252c48110977aa4cc14515b421f1bd7c33f7cac`
+- synchronisierter PR-Head vor diesem Dokumentationsupdate: `c8878a3fbbdd2cec2d36de1db695205bcf54cae3`
+- Merge-Base = aktueller `main`
+- behind by: 0
+- effektiver Diff nach Synchronisierung: 3 P3-052-Dateien
+- Diff-Groesse vor diesem Dokumentationsupdate: +518 / -0
+- GitHub mergeability: mergeable
+
+Es existierten auf dem synchronisierten Head keine registrierten Commit-Status-Checks. Die TEST-Regression ist daher die ausgefuehrte Runtime-Evidence.
+
+## Supersupervisor-Regression nach main-Sync
+
+Erneut verifiziert auf `sis-platform-test` gegen den Plattformstand mit P3-049 + P3-050 + P3-052:
+
+1. kanonischer Controller `sis.controller.orchestration` aktiv: PASS
+2. alter Controller-Worker vorhanden: 0: PASS
+3. DEV/TEST `start` / `observe` / `stop` Grants: 6: PASS
+4. PROD-Grants: 0: PASS
+5. Non-Orchestration-Grants: 0: PASS
+6. erforderliche P3-049/P3-050/P3-052 Migrationen vorhanden: PASS
+7. Activation-Default = `sis.controller.orchestration`: PASS
+8. Activation Create: PASS
+9. wiederholter Start idempotent: PASS
+10. Activation/Status fuehrt kanonischen Controller-Key: PASS
+11. Supervisor Claim: PASS
+12. wiederholter Claim idempotent: PASS
+13. nach Claim erzeugte Jobs: 0: PASS
+14. Cancel: PASS
+15. wiederholter Cancel idempotent: PASS
+16. PROD-Start blockiert mit `EXECUTION_CONTROLLER_DEV_TEST_ONLY`: PASS
+17. fehlender Intent blockiert mit `EXPLICIT_EXECUTION_INTENT_REQUIRED`: PASS
+18. `anon` Start-Execute: false: PASS
+19. `authenticated` Start-Execute: false: PASS
+20. `service_role` Start-Execute: true: PASS
+21. temporaere Regression-Fixtures entfernt: PASS
+22. alte Activation-Referenzen auf `sis.control_supervisor`: 0: PASS
+
+Die Post-Sync-Regression hat bewusst keinen Delegations-RPC aufgerufen und keinen Worker gestartet. Damit wurde die Controller-/Supervisor-Grenze isoliert geprueft. Die fruehere P3-052-Evidence fuer serverseitige Worker-Zuweisung ueber P3-045 bleibt bestehen.
+
 ## Sicherheitsgrenzen
 
 - kein PROD
@@ -131,4 +174,4 @@ Die vorangegangene P3-052-Regression fuer serverseitige Worker-Auswahl und P3-04
 
 ## Naechster Schritt
 
-PR #17 gegen den inzwischen durch P3-049 und P3-050 aktualisierten `main` synchronisieren, den effektiven Diff erneut pruefen und die P3-052-Regression gegen diesen Stand wiederholen. Erst danach Merge-Readiness bewerten. Eine PROD-Promotion bleibt separat approval-gated.
+PR #17 ist mit aktuellem `main` synchronisiert und TEST-regression-verifiziert. Ein Merge erfordert eine separate explizite Autorisierung. Eine PROD-Promotion bleibt ebenfalls separat approval-gated.
