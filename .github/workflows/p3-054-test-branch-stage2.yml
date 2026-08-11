@@ -71,7 +71,6 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy-smoke' }}
     needs: preflight
     runs-on: ubuntu-latest
-    environment: p3-054-test
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       P3_054_CONFIRM_TEST_REF: ${{ inputs.confirm_test_ref }}
